@@ -106,9 +106,19 @@ harmonize <- function(df, year, survey_year = NULL) {
           P62 %in% c(1) ~ 1, TRUE ~ 0
         ),
         FEMALE = if_else(P27 == 2, 1, 0),
-        HH_INC = case_when(P66 %in% 1:10 ~ P66, P66 %in% c(98, 99) ~ 99, TRUE ~ NA_real_),
+        HH_INC = case_when(
+          P66 >= 2 & P66 <= 11 ~ as.integer(P66 - 1),
+          TRUE ~ NA_integer_
+        ),
         SCHOOL = if_else(P32 == 1, 1, 0),
-        EDUCATION = if_else(SCHOOL == 1, as.numeric(P32A01), 0),
+        EDUCATION = case_when(
+          P32A01 == 1 ~ 0,
+          P32A01 == 2 ~ 3,
+          P32A01 == 3 ~ 6,
+          P32A01 %in% c(4,5,6) ~ 12,
+          P32A01 >= 7 ~ 16,
+          TRUE ~ NA_real_
+        ),
         FATHER_BORN_SPAIN = if_else(P15C == 1, 1, 0),
         MOTHER_BORN_SPAIN = if_else(P14C == 1, 1, 0),
         FATHER_SCHOOL = if_else(P15M == 1, 1, 0),
@@ -176,9 +186,23 @@ harmonize <- function(df, year, survey_year = NULL) {
           P80 %in% c(1) ~ 1, TRUE ~ 0
         ),
         FEMALE = if_else(P53 == 2, 1, 0),
-        HH_INC = case_when(P84 %in% 1:10 ~ P84, P84 %in% c(98, 99) ~ 99, TRUE ~ NA_real_),
+        HH_INC = case_when(
+          P84 >= 2 & P84 <= 11 ~ as.integer(P84 - 1),
+          TRUE ~ NA_integer_
+        ),
         SCHOOL = if_else(P58 == 3, 1, 0),
-        EDUCATION = as.numeric(P58A),
+        EDUCATION = case_when(
+          P58 %in% c(1,2) ~ 0,
+          P58 == 3 & P58B == 3 & P58C == 1 ~ 0,
+          P58 == 3 & P58B == 3 & P58C %in% 2:3 ~ 6,
+          P58 == 3 & P58B == 3 & P58C %in% 4:7 ~ 12,
+          P58 == 3 & P58B == 3 & P58C >= 8 ~ 16,
+          P58 == 3 & P58B %in% c(1,2) & P58A == 1 ~ 0,
+          P58 == 3 & P58B %in% c(1,2) & P58A %in% 2:3 ~ 6,
+          P58 == 3 & P58B %in% c(1,2) & P58A %in% 4:7 ~ 12,
+          P58 == 3 & P58B %in% c(1,2) & P58A >= 8 ~ 16,
+          TRUE ~ NA_real_
+        ),
         FATHER_BORN_SPAIN = if_else(P43C == 1, 1, 0),
         MOTHER_BORN_SPAIN = if_else(P42C == 1, 1, 0),
         FATHER_SCHOOL = if_else(P43J == 3, 1, 0),
@@ -246,9 +270,18 @@ harmonize <- function(df, year, survey_year = NULL) {
           P64 %in% c(1) ~ 1, TRUE ~ 0
         ),
         FEMALE = if_else(P0 == 2, 1, 0),
-        HH_INC = case_when(P68 %in% 1:11 ~ P68, P68 %in% c(98, 99) ~ 99, TRUE ~ NA_real_),
+        HH_INC = case_when(
+          P68 >= 2 & P68 <= 11 ~ as.integer(P68 - 1),
+          TRUE ~ NA_integer_
+        ),
         SCHOOL = if_else(P40 == 3, 1, 0),
-        EDUCATION = as.numeric(P401),
+        EDUCATION = case_when(
+          P401 == 1 ~ 0,
+          P401 %in% 2:3 ~ 6,
+          P401 %in% 4:7 ~ 12,
+          P401 >= 8 ~ 16,
+          TRUE ~ NA_real_
+        ),
         FATHER_BORN_SPAIN = if_else(P27C == 1, 1, 0),
         MOTHER_BORN_SPAIN = if_else(P26C == 1, 1, 0),
         FATHER_SCHOOL = if_else(P27J == 3, 1, 0),
@@ -329,13 +362,19 @@ harmonize <- function(df, year, survey_year = NULL) {
           TRUE ~ 0
         ),
         FEMALE = if_else(SEX == 2, 1, 0),
-        NAT_RINC = case_when(
-          NAT_RINC %in% 1:10 ~ NAT_RINC,
-          NAT_RINC %in% c(97, 99) ~ 99,
-          TRUE ~ NA_real_
+        HH_INC = case_when(
+          NAT_RINC >= 1 & NAT_RINC <= 10 ~ NAT_RINC,
+          TRUE ~ NA_integer_
         ),
         SCHOOL = NA_real_,
-        EDUCATION = as.numeric(NAT_DEGR),
+        EDUCATION = case_when(
+          NAT_DEGR == 1 ~ 0,
+          NAT_DEGR == 2 ~ 3,
+          NAT_DEGR == 3 ~ 6,
+          NAT_DEGR >= 4 & NAT_DEGR <= 15 ~ 12,
+          NAT_DEGR >= 16 ~ 16,
+          TRUE ~ NA_real_
+        ),
         FATHER_BORN_SPAIN = if_else(F_BORN == 1, 1, 0),
         MOTHER_BORN_SPAIN = if_else(M_BORN == 1, 1, 0),
         FATHER_SCHOOL = if_else(FATH_NAT_DEGR == 0, 0, 1),
@@ -414,13 +453,19 @@ harmonize <- function(df, year, survey_year = NULL) {
           TRUE ~ 0
         ),
         FEMALE = if_else(SEXO == 2, 1, 0),
-        NAT_RINC = case_when(
-          NAT_RINC %in% 1:10 ~ NAT_RINC,
-          NAT_RINC %in% c(97, 99) ~ 99,
-          TRUE ~ NA_real_
+        HH_INC = case_when(
+          NAT_RINC >= 1 & NAT_RINC <= 10 ~ NAT_RINC,
+          TRUE ~ NA_integer_
         ),
         SCHOOL = NA_real_,
-        EDUCATION = as.numeric(NAT_DEGR),
+        EDUCATION = case_when(
+          NAT_DEGR == 1 ~ 0,
+          NAT_DEGR == 2 ~ 3,
+          NAT_DEGR == 3 ~ 6,
+          NAT_DEGR >= 4 & NAT_DEGR <= 15 ~ 12,
+          NAT_DEGR >= 16 ~ 16,
+          TRUE ~ NA_real_
+        ),
         FATHER_BORN_SPAIN = if_else(F_BORN == 1, 1, 0),
         MOTHER_BORN_SPAIN = if_else(M_BORN == 1, 1, 0),
         FATHER_SCHOOL = if_else(FATH_NAT_DEGR == 0, 0, 1),
@@ -577,6 +622,87 @@ survey_final %>%
     n_missing_childhood_avg_precip = sum(is.na(childhood_avg_precip)),
     n_missing_childhood_total_dry_days = sum(is.na(childhood_total_dry_days))
   )
+
+# =====================================================
+# 📊 ATTRITION ANALYSIS ACROSS SURVEY WAVES
+# =====================================================
+
+library(dplyr)
+library(ggplot2)
+library(broom)
+library(modelsummary)
+
+# 1. Keep comparable variables across all waves
+attrition_data <- survey_final %>%
+  filter(!is.na(AGE), !is.na(FEMALE), !is.na(EDUCATION), !is.na(CATHOLIC)) %>%
+  mutate(
+    wave = factor(survey_year),
+    post2013 = if_else(survey_year > 2013, 1, 0)  # indicator for follow-up wave
+  ) %>%
+  select(post2013, wave, AGE, FEMALE, EDUCATION, CATHOLIC, PARTICIPATION, CONSERVATIVE_VOTE, RELIGIOUS_PRACTICE, COUPLE_CATHOLIC, FAR_RIGHT_VOTE)
+
+# 2. Descriptive comparison of means across survey years
+attrition_descriptives <- attrition_data %>%
+  group_by(wave) %>%
+  summarise(
+    N = n(),
+    mean_age = mean(AGE, na.rm = TRUE),
+    female_share = mean(FEMALE, na.rm = TRUE),
+    mean_education_years = mean(EDUCATION, na.rm = TRUE),
+    catholic_share = mean(CATHOLIC, na.rm = TRUE),
+    participation_rate = mean(PARTICIPATION, na.rm = TRUE)
+  )
+
+print(attrition_descriptives)
+
+# List of core variables used in analysis
+core_vars <- c("AGE", "FEMALE", "EDUCATION", "CATHOLIC", "PARTICIPATION")
+
+attrition_data %>%
+  group_by(wave) %>%
+  summarise(
+    N = n(),
+    mean_age = mean(AGE, na.rm = TRUE),
+    female_share = mean(FEMALE, na.rm = TRUE),
+    mean_education_years = mean(EDUCATION, na.rm = TRUE),
+    catholic_share = mean(CATHOLIC, na.rm = TRUE),
+    participation_rate = mean(PARTICIPATION, na.rm = TRUE),
+    conservative_vote = mean(CONSERVATIVE_VOTE, na.rm = TRUE),
+    religious_practice = mean(RELIGIOUS_PRACTICE, na.rm = TRUE),
+    couple_catholic = mean(COUPLE_CATHOLIC, na.rm = TRUE),
+    far_right_vote = mean(FAR_RIGHT_VOTE, na.rm = TRUE)
+  ) %>%
+  knitr::kable(format = "latex", digits = 3, booktabs = TRUE,
+               caption = "Descriptive statistics by survey wave, including political and religious indicators")
+
+library(dplyr)
+library(tidyr)
+
+# Explicit list of variables used in the attrition summary
+vars_to_check <- c(
+  "AGE", "FEMALE", "EDUCATION", "CATHOLIC", "PARTICIPATION",
+  "CONSERVATIVE_VOTE", "RELIGIOUS_PRACTICE", "COUPLE_CATHOLIC", "FAR_RIGHT_VOTE"
+)
+
+# Compute missing values by wave
+missing_by_wave <- survey_final %>%
+  group_by(survey_year) %>%
+  summarise(across(all_of(vars_to_check), ~ sum(is.na(.)), .names = "na_{col}")) %>%
+  pivot_longer(
+    cols = starts_with("na_"),
+    names_to = "variable",
+    values_to = "n_missing"
+  ) %>%
+  mutate(variable = sub("^na_", "", variable)) %>%
+  pivot_wider(names_from = survey_year, values_from = n_missing) %>%
+  arrange(variable)
+
+# View result
+print(missing_by_wave)
+
+
+
+
 # Export result
 write_csv(survey_final, "survey_with_childhood_weather_harmonized.csv")
 
