@@ -1,0 +1,1062 @@
+# =========================================================
+# CONFIDENTIAL INE MATRIMONIOS (2008–2024) — FULL PIPELINE
+# Municipality-level rain exposure (ONLY total childhood dry days, ages 5–18)
+#
+# GUARANTEES / FIXES:
+#  - Build person municipality key mun_birth_key = PPMMM robustly
+#  - Treat invalid birth geo codes as NA (so exposure becomes NA, not 0)
+#  - Build municipality rain panel key = PPMMM robustly; clamp dry_days_10 to [0,8]
+#  - Drop artifact municipalities:
+#       (a) all years are 0
+#       (b) (optional) user-provided “bad” keys
+#  - Exposure computed by exact 14-year join (b+5..b+18):
+#       -> if ANY year missing in window => NA (never imputed as 0)
+#       -> sums EXACTLY the 14 annual values (no rolling tricks)
+#  - Birth year fix:
+#       -> Use ANION when available
+#       -> Else infer anio_nacimiento = ANOCM - EDAD (plausibility checked)
+#  - Diagnostics: max exposure <= 112, frequency table, missingness summary
+# =========================================================
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(readr)
+  library(readxl)
+  library(stringr)
+  library(fs)
+  library(cellranger)
+  library(data.table)
+})
+
+rm(list = ls())
+
+# -----------------------
+# 0) PATHS
+# -----------------------
+base_dir      <- "C:/Users/Saúl/Desktop/Semana Santa project/Datos matrimonios confidenciales"
+layout_file   <- file.path(base_dir, "dr_MNPmatrim_Desde2016.xlsx")
+
+grid_dir      <- "C:/Users/Saúl/Desktop/Semana Santa project/Grid precipitation"
+mun_rain_xlsx <- file.path(grid_dir, "municipality_drydays_areaweight_d10_INEcodes_NOIMPUTE.xlsx")
+
+out_rds       <- file.path(base_dir, "microdatos_personas_2008_2024_mun_total_dry_days.rds")
+
+stopifnot(file.exists(layout_file))
+stopifnot(file.exists(mun_rain_xlsx))
+
+# -----------------------
+# 1) HELPERS
+# -----------------------
+first_existing_ci <- function(df, candidates){
+  nm <- names(df)
+  m  <- match(tolower(candidates), tolower(nm))
+  i  <- which(!is.na(m))[1]
+  if (length(i)) nm[m[i]] else NA_character_
+}
+
+infer_year <- function(path) {
+  b <- basename(path)
+  m4 <- str_match(b, "(19|20)\\d{2}")
+  if (!all(is.na(m4))) return(as.integer(m4[,1]))
+  m2 <- str_match(b, "(\\b|_)(0[8-9]|1[0-9]|2[0-4])(\\b|_)")
+  if (!all(is.na(m2))) return(as.integer(paste0("20", m2[,2])))
+  NA_integer_
+}
+
+# --- Layout -> FWF spec using sheet "Diseño" (VARIABLE + POSICIÓN + LONGITUD) ---
+make_fwf_spec_from_layout_disenio <- function(path, sheet = "Diseño") {
+  raw <- suppressMessages(readxl::read_excel(
+    path, sheet = sheet,
+    range = cellranger::cell_limits(c(1,1), c(2000, 30)),
+    col_names = FALSE
+  ))
+  if (nrow(raw) == 0) stop("Layout sheet empty: ", sheet)
+  
+  h <- NA_integer_
+  for (i in 1:min(150, nrow(raw))) {
+    hdr <- toupper(as.character(unlist(raw[i, ], use.names = FALSE)))
+    hdr[is.na(hdr)] <- ""
+    ok_var <- any(str_detect(hdr, regex("^VARIABLE$|NOMBRE|CAMPO|ETIQUETA", TRUE)))
+    ok_pos <- any(str_detect(hdr, regex("POSIC", TRUE)))
+    ok_len <- any(str_detect(hdr, regex("LONGIT|LONG|ANCHO|TAM|WIDTH", TRUE)))
+    if (ok_var && ok_pos && ok_len) { h <- i; break }
+  }
+  if (is.na(h)) stop("Could not find header row with VARIABLE + POSIC + LONGITUD in sheet: ", sheet)
+  
+  hdr <- toupper(as.character(unlist(raw[h, ], use.names = FALSE)))
+  hdr[is.na(hdr)] <- ""
+  
+  var_idx <- which(str_detect(hdr, regex("^VARIABLE$|NOMBRE|CAMPO|ETIQUETA", TRUE)))[1]
+  pos_idx <- which(str_detect(hdr, regex("POSIC", TRUE)))[1]
+  len_idx <- which(str_detect(hdr, regex("LONGIT|LONG|ANCHO|TAM|WIDTH", TRUE)))[1]
+  if (any(is.na(c(var_idx, pos_idx, len_idx)))) stop("Header found but indices failed on sheet: ", sheet)
+  
+  tbl <- raw[(h+1):nrow(raw), , drop = FALSE]
+  names(tbl) <- paste0("V", seq_len(ncol(tbl)))
+  
+  spec <- tbl %>%
+    transmute(
+      var   = .data[[paste0("V", var_idx)]],
+      start = suppressWarnings(as.integer(.data[[paste0("V", pos_idx)]])),
+      width = suppressWarnings(as.integer(.data[[paste0("V", len_idx)]]))
+    ) %>%
+    filter(!is.na(var), !is.na(start), !is.na(width), width > 0) %>%
+    mutate(var = toupper(make.names(as.character(var))))
+  
+  if (!nrow(spec)) stop("Parsed 0 rows for (var,start,width) from sheet: ", sheet)
+  
+  readr::fwf_positions(
+    start = spec$start,
+    end   = spec$start + spec$width - 1L,
+    col_names = spec$var
+  )
+}
+
+# -----------------------
+# 2) READ ALL .DAT (2008–2024) -> microdatos
+# -----------------------
+dat_files <- fs::dir_ls(base_dir, recurse = TRUE, type = "file") %>%
+  keep(~ str_detect(toupper(basename(.x)), "\\.DAT$")) %>%
+  unique()
+
+if (!length(dat_files)) stop("No .DAT files found under: ", base_dir)
+
+fwf_spec <- make_fwf_spec_from_layout_disenio(layout_file, sheet = "Diseño")
+
+read_one_dat <- function(path) {
+  yr <- infer_year(path)
+  df <- readr::read_fwf(
+    file = path,
+    col_positions = fwf_spec,
+    col_types = cols(.default = col_character()),
+    locale = locale(encoding = "Latin1"),
+    progress = TRUE
+  ) %>% as_tibble()
+  names(df) <- toupper(names(df))
+  if (!is.na(yr)) df <- mutate(df, YEAR = yr)
+  df
+}
+
+message("Reading .DAT files: ", length(dat_files))
+microdatos <- purrr::map_dfr(dat_files, read_one_dat) %>%
+  readr::type_convert(na = c("", "NA", "N/A")) %>%
+  distinct()
+
+# -----------------------
+# 3) TMUNN + split A/B
+# -----------------------
+tmunna <- if ("TMUNNA" %in% names(microdatos)) suppressWarnings(as.integer(microdatos$TMUNNA)) else rep(NA_integer_, nrow(microdatos))
+tmunnb <- if ("TMUNNB" %in% names(microdatos)) suppressWarnings(as.integer(microdatos$TMUNNB)) else rep(NA_integer_, nrow(microdatos))
+
+microdatos <- microdatos %>%
+  mutate(
+    TMUNN = case_when(
+      (is.na(tmunna) | tmunna == 0L) & (is.na(tmunnb) | tmunnb == 0L) ~ NA_integer_,
+      !is.na(tmunna) & tmunna != 0L                                   ~ tmunna,
+      !is.na(tmunnb) & tmunnb != 0L                                   ~ tmunnb,
+      TRUE ~ NA_integer_
+    )
+  ) %>%
+  select(-any_of(c("TMUNNA","TMUNNB"))) %>%
+  mutate(marriage_id = row_number())
+
+ca_cols <- grep("CA$", names(microdatos), value = TRUE)
+cb_cols <- grep("CB$", names(microdatos), value = TRUE)
+if (!length(ca_cols) || !length(cb_cols)) stop("Need both *CA and *CB columns.")
+
+shared_vars <- setdiff(names(microdatos), c(ca_cols, cb_cols))
+
+A <- microdatos %>%
+  select(all_of(shared_vars), all_of(ca_cols)) %>%
+  rename_with(~ sub("CA$", "", .x), all_of(ca_cols)) %>%
+  mutate(conyuge = "A")
+
+B <- microdatos %>%
+  select(all_of(shared_vars), all_of(cb_cols)) %>%
+  rename_with(~ sub("CB$", "", .x), all_of(cb_cols)) %>%
+  mutate(conyuge = "B")
+
+base_union <- union(names(A), names(B))
+if (length(setdiff(base_union, names(A)))) A[setdiff(base_union, names(A))] <- NA
+if (length(setdiff(base_union, names(B)))) B[setdiff(base_union, names(B))] <- NA
+A <- A[, base_union]; B <- B[, base_union]
+
+microdatos_personas <- bind_rows(
+  mutate(A, across(everything(), as.character)),
+  mutate(B, across(everything(), as.character))
+) %>%
+  readr::type_convert(na = c("", "NA", "N/A")) %>%
+  mutate(conyuge = factor(conyuge, levels = c("A","B")))
+
+stopifnot(nrow(microdatos_personas) == 2L * nrow(microdatos))
+leftover <- grep("(CA|CB)$", names(microdatos_personas), value = TRUE)
+if (length(leftover)) stop("Suffixed columns survived split: ", paste(leftover, collapse = ", "))
+
+# -----------------------
+# 4) CLEAN: rename key vars + divorced/army
+# -----------------------
+base_map <- c(
+  MESN  = "mes_nacimiento",
+  ANION = "anio_nacimiento",   # keep name, we will FIX it below
+  EDAD  = "edad",
+  SEXO  = "sexo",
+  ECIV  = "estado_civil",
+  CPRON = "provincia_nacimiento_codigo",
+  CMUNN = "municipio_nacimiento_codigo",
+  CAUTO = "codigo_autoasignado_profesion"
+)
+
+to_apply <- base_map[names(base_map) %in% names(microdatos_personas)]
+if (length(to_apply)) microdatos_personas <- microdatos_personas %>%
+  rename(!!!setNames(names(to_apply), unname(to_apply)))
+
+eciv_col <- first_existing_ci(microdatos_personas, c("estado_civil","ECIV"))
+microdatos_personas <- microdatos_personas %>%
+  mutate(
+    estado_civil_int = if (!is.na(eciv_col)) suppressWarnings(as.integer(.data[[eciv_col]])) else NA_integer_,
+    divorced = case_when(
+      is.na(estado_civil_int)          ~ NA_integer_,
+      estado_civil_int %in% c(9L, 99L) ~ NA_integer_,
+      estado_civil_int == 4L           ~ 1L,
+      TRUE                             ~ 0L
+    )
+  ) %>% select(-estado_civil_int)
+
+cauto_col <- first_existing_ci(microdatos_personas, c("codigo_autoasignado_profesion","CAUTO"))
+microdatos_personas <- microdatos_personas %>%
+  mutate(
+    CAUTO_int = if (!is.na(cauto_col)) suppressWarnings(as.integer(.data[[cauto_col]])) else NA_integer_,
+    army = case_when(
+      is.na(CAUTO_int) ~ NA_integer_,
+      CAUTO_int == 99L ~ NA_integer_,
+      CAUTO_int == 0L  ~ 1L,
+      TRUE             ~ 0L
+    )
+  ) %>% select(-CAUTO_int)
+
+microdatos_personas <- microdatos_personas %>% select(where(~ !all(is.na(.))))
+
+# -----------------------
+# 4B) FIX BIRTH YEAR:
+# Use ANION/anio_nacimiento when available; else infer = ANOCM - EDAD
+# (This MUST happen before cohort restriction + exposure)
+# -----------------------
+anio_col  <- first_existing_ci(microdatos_personas, c("anio_nacimiento","ANION"))
+edad_col  <- first_existing_ci(microdatos_personas, c("edad","EDAD"))
+anocm_col <- first_existing_ci(microdatos_personas, c("ANOCM","year","YEAR"))
+
+if (is.na(anio_col))  stop("No ANION/anio_nacimiento column found.")
+if (is.na(edad_col))  stop("No EDAD/edad column found (needed to infer birth year).")
+if (is.na(anocm_col)) stop("No ANOCM/year/YEAR column found (needed to infer birth year).")
+
+microdatos_personas <- microdatos_personas %>%
+  mutate(
+    anio_direct = suppressWarnings(as.integer(.data[[anio_col]])),
+    edad_int    = suppressWarnings(as.integer(.data[[edad_col]])),
+    year_cm_int = suppressWarnings(as.integer(.data[[anocm_col]])),
+    
+    anio_infer_raw = if_else(
+      !is.na(year_cm_int) & !is.na(edad_int),
+      year_cm_int - edad_int,
+      NA_integer_
+    ),
+    
+    anio_infer = if_else(
+      !is.na(anio_infer_raw) & anio_infer_raw >= 1900L & anio_infer_raw <= 2010L,
+      anio_infer_raw,
+      NA_integer_
+    ),
+    
+    # FINAL birth year used everywhere downstream
+    anio_nacimiento = coalesce(anio_direct, anio_infer),
+    
+    # optional diagnostic flag
+    anio_from_infer = as.integer(is.na(anio_direct) & !is.na(anio_infer))
+  ) %>%
+  select(-anio_direct, -edad_int, -year_cm_int, -anio_infer_raw, -anio_infer)
+
+cat("Birth year: share inferred among non-missing birth year = ",
+    mean(microdatos_personas$anio_from_infer == 1, na.rm = TRUE), "\n")
+
+# -----------------------
+# 5) MUNICIPALITY RAIN PANEL (xlsx) — KEY = PPMMM
+# Clamp dry_days_10 to [0,8]
+# Drop artifacts
+# -----------------------
+rain_mun_raw <- suppressMessages(readxl::read_excel(mun_rain_xlsx, sheet = 1))
+names(rain_mun_raw) <- toupper(names(rain_mun_raw))
+
+cpro_col <- first_existing_ci(rain_mun_raw, c("CPRO", "CODPROV", "PROV", "PROVINCIA_CODIGO"))
+cmun_col <- first_existing_ci(rain_mun_raw, c("CMUN", "CODMUN", "MUNICIPIO_CODIGO"))
+ine_col  <- first_existing_ci(rain_mun_raw, c("INE_MUN", "INEMUN", "CODINE", "COD_INE"))
+year_col <- first_existing_ci(rain_mun_raw, c("YEAR", "ANIO", "ANO"))
+dry_col  <- first_existing_ci(rain_mun_raw, c("DRY_DAYS_10", "DRY_DAYS", "DRYDAYS", "DRY", "DRY_DAYS_D10", "DRY_DAYS_D10_AREAWEIGHT"))
+
+if (is.na(year_col) || is.na(dry_col) || (is.na(ine_col) && (is.na(cpro_col) || is.na(cmun_col)))) {
+  stop(
+    "Could not detect required columns in municipality rain excel.\n",
+    "Need: YEAR + DRY_DAYS + (INE_MUN OR (CPRO & CMUN)).\n",
+    "Found names:\n", paste(names(rain_mun_raw), collapse = ", ")
+  )
+}
+
+rain_mun_code <- rain_mun_raw %>%
+  transmute(
+    CPRO_i = if (!is.na(cpro_col)) suppressWarnings(as.integer(.data[[cpro_col]])) else NA_integer_,
+    CMUN_i = if (!is.na(cmun_col)) suppressWarnings(as.integer(.data[[cmun_col]])) else NA_integer_,
+    INE_i  = if (!is.na(ine_col))  suppressWarnings(as.integer(.data[[ine_col]]))  else NA_integer_,
+    year   = suppressWarnings(as.integer(.data[[year_col]])),
+    dry_days_10 = suppressWarnings(as.integer(round(as.numeric(.data[[dry_col]]))))
+  ) %>%
+  mutate(
+    CPRO_i = dplyr::if_else(is.na(CPRO_i) & !is.na(INE_i), INE_i %/% 1000L, CPRO_i),
+    CMUN_i = dplyr::if_else(is.na(CMUN_i) & !is.na(INE_i), INE_i %% 1000L, CMUN_i),
+    key = dplyr::if_else(
+      !is.na(CPRO_i) & !is.na(CMUN_i),
+      paste0(sprintf("%02d", CPRO_i), sprintf("%03d", CMUN_i)),
+      NA_character_
+    ),
+    dry_days_10 = pmin(8L, pmax(0L, dry_days_10))
+  ) %>%
+  filter(!is.na(key), !is.na(year)) %>%
+  group_by(key, year) %>%
+  summarise(dry_days_10 = as.integer(round(mean(dry_days_10, na.rm = TRUE))),
+            .groups = "drop")
+
+if (!nrow(rain_mun_code)) stop("Municipality rain file produced 0 usable rows.")
+
+cat("Rain panel years:", min(rain_mun_code$year, na.rm=TRUE), "–", max(rain_mun_code$year, na.rm=TRUE), "\n")
+cat("Max dry_days_10 in rain panel:", max(rain_mun_code$dry_days_10, na.rm = TRUE), "\n")
+
+always_zero_keys <- rain_mun_code %>%
+  group_by(key) %>%
+  summarise(all_zero = all(dry_days_10 == 0L), .groups = "drop") %>%
+  filter(all_zero) %>%
+  pull(key)
+
+cat("Dropping always-zero municipalities:", length(always_zero_keys), "\n")
+if (length(always_zero_keys)) {
+  rain_mun_code <- rain_mun_code %>% filter(!(key %in% always_zero_keys))
+}
+
+bad_keys_from_you <- c(
+  "21041","08077","51001","52001","17066","17023","08073","39059","17118","48017",
+  "30036","28058","29054","39035","36003","20081","46169","33025","15043","18021",
+  "48057","08118","08262","20077","46110","41007","07014","18153","20056","20061",
+  "03050","03024","17155","46007","46164","43153","17062","15901","04049","06103",
+  "39085","48094","03071","46020","39023","46035","17047","41086","20075","08126"
+)
+cat("Dropping user-flagged bad municipalities:", length(bad_keys_from_you), "\n")
+rain_mun_code <- rain_mun_code %>% filter(!(key %in% bad_keys_from_you))
+
+cat("Remaining unique municipalities in rain:", dplyr::n_distinct(rain_mun_code$key), "\n")
+
+# -----------------------
+# 6) PERSON BIRTH CODES -> mun_birth_key = PPMMM
+# Invalid codes -> NA
+# IMPORTANT: DO NOT overwrite anio_nacimiento here (already fixed above)
+# -----------------------
+prov_col <- first_existing_ci(microdatos_personas, c("provincia_nacimiento_codigo","CPRON","CPRO"))
+mun_col  <- first_existing_ci(microdatos_personas, c("municipio_nacimiento_codigo","CMUNN","CMUN"))
+
+if (any(is.na(c(prov_col, mun_col)))) {
+  stop("Could not detect person birth geo code variables. Names seen were:\n",
+       paste(names(microdatos_personas), collapse = ", "))
+}
+
+microdatos_personas <- microdatos_personas %>%
+  mutate(
+    prov_i = suppressWarnings(as.integer(.data[[prov_col]])),
+    mun_i  = suppressWarnings(as.integer(.data[[mun_col]])),
+    
+    prov_birth_code = dplyr::if_else(!is.na(prov_i) & prov_i >= 1L & prov_i <= 52L,
+                                     sprintf("%02d", prov_i), NA_character_),
+    
+    mun_is_3digit = !is.na(mun_i) & mun_i >= 1L & mun_i <= 999L,
+    mun_is_5digit = !is.na(mun_i) & mun_i >= 1000L & mun_i <= 99999L
+  ) %>%
+  mutate(
+    mun_birth_key = dplyr::case_when(
+      mun_is_5digit ~ sprintf("%05d", mun_i),
+      mun_is_3digit & !is.na(prov_birth_code) ~ paste0(prov_birth_code, sprintf("%03d", mun_i)),
+      TRUE ~ NA_character_
+    ),
+    prov_birth_code = dplyr::if_else(
+      is.na(prov_birth_code) & mun_is_5digit,
+      sprintf("%02d", mun_i %/% 1000L),
+      prov_birth_code
+    )
+  ) %>%
+  select(-prov_i, -mun_i, -mun_is_3digit, -mun_is_5digit)
+
+
+# -----------------------
+# 7) CHILDHOOD EXPOSURE (ROBUST): sum EXACT years b+5..b+18
+# RULE: if municipality missing OR ANY year missing in window -> NA
+# -----------------------
+rain_dt <- as.data.table(rain_mun_code)[, .(
+  key = as.character(key),
+  year = as.integer(year),
+  dry_days_10 = as.integer(dry_days_10)
+)]
+setkey(rain_dt, key, year)
+rain_dt <- unique(rain_dt)
+
+dup_check <- rain_dt[, .N, by = .(key, year)][N > 1]
+if (nrow(dup_check) > 0) stop("rain_dt has duplicated (key,year) rows.")
+
+mdt <- as.data.table(microdatos_personas)[, .(
+  key             = as.character(mun_birth_key),
+  anio_nacimiento = as.integer(anio_nacimiento)
+)]
+keys <- unique(mdt, by = c("key","anio_nacimiento"))
+keys[, `:=`(S = anio_nacimiento + 5L, E = anio_nacimiento + 18L)]
+keys[, usable := !is.na(key) & !is.na(anio_nacimiento)]
+
+i_keys <- keys[usable == TRUE, .(key, anio_nacimiento, S, E)]
+
+win <- rain_dt[
+  i_keys,
+  on = .(key, year >= S, year <= E),
+  nomatch = 0L,
+  allow.cartesian = TRUE
+]
+
+agg <- win[, .(
+  win_n   = .N,
+  win_sum = as.integer(sum(dry_days_10))
+), by = .(key, anio_nacimiento)]
+
+setkey(agg, key, anio_nacimiento)
+setkey(keys, key, anio_nacimiento)
+
+keys <- agg[keys]  # left join into keys
+keys[, childhood_total_dry_days_mun :=
+       fifelse(!is.na(win_n) & win_n == 14L, win_sum, NA_integer_)]
+
+fast <- keys[, .(key, anio_nacimiento, childhood_total_dry_days_mun)]
+setkey(fast, key, anio_nacimiento)
+
+mdp <- as.data.table(microdatos_personas)
+mdp[, key := as.character(mun_birth_key)]
+mdp[, anio_nacimiento := as.integer(anio_nacimiento)]
+setkey(mdp, key, anio_nacimiento)
+
+mdp <- fast[mdp]
+mdp[, mun_birth_key := key]
+mdp[, key := NULL]
+
+microdatos_personas <- as.data.frame(mdp)
+
+microdatos_personas <- microdatos_personas %>%
+  mutate(childhood_total_dry_days_mun_std = as.numeric(scale(childhood_total_dry_days_mun)))
+
+# -----------------------
+# 8) DIAGNOSTICS
+# -----------------------
+options(na.print = "NA")
+
+max_exp <- max(microdatos_personas$childhood_total_dry_days_mun, na.rm = TRUE)
+cat("Max childhood_total_dry_days_mun:", max_exp, "\n")
+stopifnot(is.finite(max_exp), max_exp <= 112)
+
+freq_tbl <- microdatos_personas %>%
+  filter(!is.na(childhood_total_dry_days_mun)) %>%
+  count(childhood_total_dry_days_mun, name = "n") %>%
+  arrange(childhood_total_dry_days_mun)
+
+print(microdatos_personas %>%
+        summarise(
+          n = n(),
+          na_birthyear   = sum(is.na(anio_nacimiento)),
+          na_mun_key     = sum(is.na(mun_birth_key)),
+          na_total_dry   = sum(is.na(childhood_total_dry_days_mun)),
+          share_missing  = mean(is.na(childhood_total_dry_days_mun)),
+          share_zero     = mean(childhood_total_dry_days_mun == 0, na.rm = TRUE),
+          share_inferred = mean(anio_from_infer == 1, na.rm = TRUE)
+        ))
+
+# -----------------------
+# 9) SAVE
+# -----------------------
+saveRDS(microdatos_personas, out_rds)
+message("Saved: ", out_rds)
+
+# =========================================================
+# ANALYSIS — CLEAN SPECIFICATION
+# Changes:
+#  - Drop divorced regressions
+#  - Keep only Spain-born in all regressions
+#  - Add province of birth as control in all regressions
+#  - Catholic (common outcome): collapse to couple-level and include FE for BOTH spouses:
+#       mun_A + mun_B + by_A + by_B
+# =========================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(data.table)
+  library(fixest)
+  library(modelsummary)
+  library(tidyr)
+})
+
+# ---------- Guards ----------
+stopifnot("childhood_total_dry_days_mun" %in% names(microdatos_personas))
+
+if (!"childhood_total_dry_days_mun_std" %in% names(microdatos_personas)) {
+  microdatos_personas <- microdatos_personas %>%
+    mutate(childhood_total_dry_days_mun_std = as.numeric(scale(childhood_total_dry_days_mun)))
+}
+
+# Helper: detect existing columns safely
+first_existing <- function(df, candidates) {
+  hits <- candidates[candidates %in% names(df)]
+  if (length(hits)) hits[[1]] else NA_character_
+}
+
+# --------- Detect raw columns ----------
+birth_year_col    <- first_existing(microdatos_personas, c("ANION", "anio_nacimiento"))
+age_col           <- first_existing(microdatos_personas, c("EDAD", "edad"))
+ceremony_year_col <- first_existing(microdatos_personas, c("ANOCM", "YEAR", "year"))
+sex_col           <- first_existing(microdatos_personas, c("SEXO", "sexo"))
+tipoc_col         <- first_existing(microdatos_personas, c("TIPOC"))
+tmes_col          <- first_existing(microdatos_personas, c("TMES", "TMESA"))
+
+# should exist from earlier pipeline
+prov_birth_col <- first_existing(microdatos_personas, c("prov_birth_code"))
+mun_key_col    <- first_existing(microdatos_personas, c("mun_birth_key"))
+
+if (any(is.na(c(birth_year_col, ceremony_year_col, sex_col, tipoc_col, mun_key_col)))) {
+  stop("Missing required columns. Found:\n",
+       "birth_year_col=", birth_year_col, "\n",
+       "ceremony_year_col=", ceremony_year_col, "\n",
+       "sex_col=", sex_col, "\n",
+       "tipoc_col=", tipoc_col, "\n",
+       "mun_key_col=", mun_key_col, "\n",
+       "prov_birth_col=", prov_birth_col, "\n",
+       "tmes_col=", tmes_col)
+}
+
+# ---------------------------------------------------------
+# 1) CREATE DERIVED VARIABLES
+# ---------------------------------------------------------
+microdatos_personas <- microdatos_personas %>%
+  mutate(
+    ceremony_year = suppressWarnings(as.integer(.data[[ceremony_year_col]])),
+    
+    by_direct = suppressWarnings(as.integer(.data[[birth_year_col]])),
+    age_any   = if (!is.na(age_col)) suppressWarnings(as.integer(.data[[age_col]])) else NA_integer_,
+    by_from_ceremony = suppressWarnings(as.integer(if_else(
+      !is.na(ceremony_year) & !is.na(age_any),
+      ceremony_year - age_any,
+      NA_integer_
+    ))),
+    anio_nacimiento_filled_raw = coalesce(by_direct, by_from_ceremony),
+    anio_nacimiento_filled = ifelse(
+      !is.na(anio_nacimiento_filled_raw) &
+        anio_nacimiento_filled_raw >= 1900 & anio_nacimiento_filled_raw <= 2010,
+      anio_nacimiento_filled_raw, NA_integer_
+    ),
+    
+    sex_raw = suppressWarnings(as.integer(.data[[sex_col]])),
+    female = case_when(
+      sex_raw == 6L ~ 1L,
+      sex_raw == 1L ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+    
+    Catholic_Marriage = as.integer(suppressWarnings(as.integer(.data[[tipoc_col]])) == 1L),
+    
+    mun_birth_key = as.character(.data[[mun_key_col]]),
+    ceremony_month = if (!is.na(tmes_col)) suppressWarnings(as.integer(.data[[tmes_col]])) else NA_integer_
+  ) %>%
+  select(-sex_raw, -by_direct, -age_any, -by_from_ceremony, -anio_nacimiento_filled_raw)
+
+# born_in_spain: use prov_birth_code if present, else derive from mun_birth_key
+if (!is.na(prov_birth_col) && prov_birth_col %in% names(microdatos_personas)) {
+  microdatos_personas <- microdatos_personas %>%
+    mutate(
+      prov_birth_code = as.character(.data[[prov_birth_col]]),
+      born_in_spain = prov_birth_code %in% sprintf("%02d", 1:52)
+    )
+} else {
+  microdatos_personas <- microdatos_personas %>%
+    mutate(
+      prov_birth_code = ifelse(!is.na(mun_birth_key),
+                               sprintf("%02d", as.integer(substr(mun_birth_key, 1, 2))),
+                               NA_character_),
+      born_in_spain = prov_birth_code %in% sprintf("%02d", 1:52)
+    )
+}
+
+# ---------------------------------------------------------
+# 2) FOREIGN_COUPLE (spouse not born in Spain) — SAFE JOIN
+# ---------------------------------------------------------
+setDT(microdatos_personas)
+stopifnot("marriage_id" %in% names(microdatos_personas))
+stopifnot("conyuge" %in% names(microdatos_personas))
+stopifnot("born_in_spain" %in% names(microdatos_personas))
+
+sp <- microdatos_personas[, .(
+  marriage_id,
+  conyuge = as.character(conyuge),
+  spouse_born_in_spain = born_in_spain
+)]
+sp[, conyuge := fifelse(conyuge == "A", "B", "A")]
+
+setkey(microdatos_personas, marriage_id, conyuge)
+setkey(sp, marriage_id, conyuge)
+
+microdatos_personas <- sp[microdatos_personas]
+
+microdatos_personas[, foreign_couple :=
+                      fifelse(is.na(spouse_born_in_spain), NA_integer_,
+                              fifelse(spouse_born_in_spain, 0L, 1L))
+]
+
+setDF(microdatos_personas)
+
+# ---------------------------------------------------------
+# 3) BUILD FINAL MODEL DATA
+# Spain-born only in all regressions
+# ---------------------------------------------------------
+model_data_clean <- microdatos_personas %>%
+  filter(
+    born_in_spain,
+    !is.na(childhood_total_dry_days_mun),
+    !is.na(childhood_total_dry_days_mun_std),
+    !is.na(mun_birth_key),
+    !is.na(anio_nacimiento_filled),
+    !is.na(female),
+    !is.na(Catholic_Marriage),
+    !is.na(prov_birth_code)
+  ) %>%
+  mutate(
+    prov_birth_code = as.character(prov_birth_code),
+    marriage_id     = as.character(marriage_id),
+    exposure_std    = childhood_total_dry_days_mun_std,
+    exposure_std_sq = exposure_std^2
+  )
+
+cat("Clean analysis sample size (individual sample, Spain-born only):", nrow(model_data_clean), "\n")
+
+# ---------------------------------------------------------
+# 4A) INDIVIDUAL OUTCOME (person level)
+# Province of birth added as control
+# ---------------------------------------------------------
+MUN_army <- feols(
+  army ~ exposure_std + female + factor(prov_birth_code) |
+    mun_birth_key + anio_nacimiento_filled,
+  data    = model_data_clean,
+  cluster = ~ mun_birth_key
+)
+
+# ---------------------------------------------------------
+# 4B) COUPLE-LEVEL DATA FOR CATHOLIC MARRIAGE
+# Keep ONLY mixed-sex couples, Spain-born only
+# ---------------------------------------------------------
+mixed_sex_ids <- model_data_clean %>%
+  group_by(marriage_id) %>%
+  summarise(
+    has_A = any(conyuge == "A"),
+    has_B = any(conyuge == "B"),
+    is_mixed_sex = (any(female == 1L, na.rm = TRUE) & any(female == 0L, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  filter(has_A, has_B, is_mixed_sex) %>%
+  pull(marriage_id)
+
+cat("Mixed-sex couples:", length(mixed_sex_ids), "\n")
+
+couple_data <- model_data_clean %>%
+  filter(marriage_id %in% mixed_sex_ids) %>%
+  select(
+    marriage_id,
+    conyuge,
+    Catholic_Marriage,
+    exposure_std,
+    exposure_std_sq,
+    mun_birth_key,
+    prov_birth_code,
+    anio_nacimiento_filled,
+    ceremony_year,
+    ceremony_month
+  ) %>%
+  pivot_wider(
+    id_cols = marriage_id,
+    names_from = conyuge,
+    values_from = c(
+      exposure_std, exposure_std_sq,
+      mun_birth_key, prov_birth_code,
+      anio_nacimiento_filled
+    )
+  ) %>%
+  left_join(
+    model_data_clean %>%
+      filter(marriage_id %in% mixed_sex_ids) %>%
+      distinct(marriage_id, Catholic_Marriage, ceremony_year, ceremony_month),
+    by = "marriage_id"
+  )
+
+couple_data <- couple_data %>%
+  filter(
+    !is.na(exposure_std_A), !is.na(exposure_std_B),
+    !is.na(mun_birth_key_A), !is.na(mun_birth_key_B),
+    !is.na(prov_birth_code_A), !is.na(prov_birth_code_B),
+    !is.na(anio_nacimiento_filled_A), !is.na(anio_nacimiento_filled_B),
+    !is.na(Catholic_Marriage)
+  )
+
+cat("Couple sample size (mixed-sex, Spain-born only, usable):", nrow(couple_data), "\n")
+
+# ---------------------------------------------------------
+# 4C) Catholic Marriage — Couple-Level Regression (A,B + A×B)
+# Province of birth for both spouses added as controls
+# ---------------------------------------------------------
+MUN_catholic_couple <- feols(
+  Catholic_Marriage ~
+    exposure_std_A +
+    exposure_std_B +
+    exposure_std_A:exposure_std_B +
+    factor(prov_birth_code_A) +
+    factor(prov_birth_code_B) |
+    mun_birth_key_A + mun_birth_key_B +
+    anio_nacimiento_filled_A + anio_nacimiento_filled_B,
+  data    = couple_data,
+  cluster = ~ mun_birth_key_A + mun_birth_key_B
+)
+
+# ---------------------------------------------------------
+# 4D) Couple-level "common exposure": (raw_A + raw_B) then standardize
+# ---------------------------------------------------------
+mu_raw <- mean(model_data_clean$childhood_total_dry_days_mun, na.rm = TRUE)
+sd_raw <- sd(model_data_clean$childhood_total_dry_days_mun, na.rm = TRUE)
+stopifnot(is.finite(mu_raw), is.finite(sd_raw), sd_raw > 0)
+
+couple_data <- couple_data %>%
+  mutate(
+    exposure_raw_A   = exposure_std_A * sd_raw + mu_raw,
+    exposure_raw_B   = exposure_std_B * sd_raw + mu_raw,
+    exposure_raw_sum = exposure_raw_A + exposure_raw_B,
+    exposure_sum_std = as.numeric(scale(exposure_raw_sum))
+  )
+
+MUN_catholic_couple_sum <- feols(
+  Catholic_Marriage ~ exposure_sum_std +
+    factor(prov_birth_code_A) +
+    factor(prov_birth_code_B) |
+    mun_birth_key_A + mun_birth_key_B +
+    anio_nacimiento_filled_A + anio_nacimiento_filled_B,
+  data    = couple_data,
+  cluster = ~ mun_birth_key_A + mun_birth_key_B +
+    anio_nacimiento_filled_A + anio_nacimiento_filled_B
+)
+
+# ---------------------------------------------------------
+# OUTPUTS
+# ---------------------------------------------------------
+modelsummary(
+  list(
+    "Army (Mun FE)"                = MUN_army,
+    "Catholic (Couple: A,B + A×B)" = MUN_catholic_couple
+  ),
+  output = "latex",
+  stars = c("*"=.10, "**"=.05, "***"=.01),
+  coef_rename = c(
+    "exposure_std"      = "Dry days (std)",
+    "exposure_std_A"    = "Dry days A",
+    "exposure_std_B"    = "Dry days B",
+    "exposure_std_A:exposure_std_B" = "A $\\times$ B",
+    "exposure_sum_std"  = "Dry days (A+B, std)",
+    "female"            = "Female"
+  ),
+  coef_omit = "ceremony_month|prov_birth_code"
+)
+
+# ---------------------------------------------------------
+# 5) ROBUSTNESS — Province FE (NO year_cm)
+# Changes:
+#  - Individual: multiway clustering province + cohort + marriage_id
+#  - Couple: multiway clustering prov_A + prov_B + cohort_A + cohort_B
+# ---------------------------------------------------------
+
+PROV_army <- feols(
+  army ~ exposure_std + exposure_std_sq + female |
+    prov_birth_code + anio_nacimiento_filled,
+  data    = model_data_clean,
+  cluster = ~ prov_birth_code + anio_nacimiento_filled + marriage_id
+)
+
+PROV_divorced <- feols(
+  divorced ~ exposure_std + exposure_std_sq + female |
+    prov_birth_code + anio_nacimiento_filled,
+  data    = model_data_clean,
+  cluster = ~ prov_birth_code + anio_nacimiento_filled + marriage_id
+)
+
+PROV_catholic_couple <- feols(
+  Catholic_Marriage ~
+    # spouse A main
+    exposure_std_A + 
+    # spouse B main
+    exposure_std_B + 
+    # interactions (A × B)
+    exposure_std_A:exposure_std_B  |
+    prov_birth_code_A + prov_birth_code_B +
+    anio_nacimiento_filled_A + anio_nacimiento_filled_B,
+  data    = couple_data,
+  cluster = ~ prov_birth_code_A + prov_birth_code_B 
+)
+
+modelsummary(
+  list(
+    "Army (Prov FE)"           = PROV_army,
+    "Divorced (Prov FE)"       = PROV_divorced,
+    "Catholic (Prov FE)"       = PROV_catholic_couple
+  ),
+  stars = c("*"=.10, "**"=.05, "***"=.01)
+)
+
+# =========================================================
+# 4D) NON-PARAMETRIC CHECK: Quartiles of exposure (Individual + Couple sum)
+# Outcomes: Army (individual) and Catholic_Marriage (couple)
+# =========================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(broom)
+  library(purrr)
+  library(scales)
+  library(modelsummary)
+})
+
+# ----------------------------
+# 0) Choose treatment variable
+# ----------------------------
+# Standard choice (recommended): standardized exposure
+x_ind <- "exposure_std"   # in model_data_clean
+
+# If you want RAW quartiles instead, use:
+# x_ind <- "childhood_total_dry_days_mun"
+
+stopifnot(x_ind %in% names(model_data_clean))
+
+# ----------------------------
+# 1) Individual quartiles + table
+# ----------------------------
+model_data_q <- model_data_clean %>%
+  mutate(
+    treat_q = ntile(.data[[x_ind]], 4)  # 1=lowest, 4=highest
+  )
+
+quartile_table_ind <- model_data_q %>%
+  group_by(treat_q) %>%
+  summarise(
+    n_obs  = n(),
+    min_x  = min(.data[[x_ind]], na.rm = TRUE),
+    max_x  = max(.data[[x_ind]], na.rm = TRUE),
+    mean_x = mean(.data[[x_ind]], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(quartile = paste0("Q", treat_q)) %>%
+  select(quartile, n_obs, min_x, max_x, mean_x)
+
+print(quartile_table_ind)
+
+# ----------------------------
+# 2) Couple quartiles (sum exposure A+B) + table
+# ----------------------------
+stopifnot(all(c("exposure_std_A","exposure_std_B") %in% names(couple_data)))
+
+couple_data_q <- couple_data %>%
+  mutate(
+    couple_exposure_sum = exposure_std_A + exposure_std_B,
+    treat_q_couple      = ntile(couple_exposure_sum, 4)
+  )
+
+quartile_table_couple <- couple_data_q %>%
+  group_by(treat_q_couple) %>%
+  summarise(
+    n_obs  = n(),
+    min_x  = min(couple_exposure_sum, na.rm = TRUE),
+    max_x  = max(couple_exposure_sum, na.rm = TRUE),
+    mean_x = mean(couple_exposure_sum, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(quartile = paste0("Q", treat_q_couple)) %>%
+  select(quartile, n_obs, min_x, max_x, mean_x)
+
+print(quartile_table_couple)
+
+# ----------------------------
+# 3) Distribution plots (bands from ntile groups)
+# ----------------------------
+plot_dist_quartiles <- function(df, x, qvar, title, binwidth = NULL) {
+  df <- df %>% filter(!is.na(.data[[x]]), !is.na(.data[[qvar]]))
+  
+  ranges <- df %>%
+    group_by(.data[[qvar]]) %>%
+    summarise(
+      xmin = min(.data[[x]], na.rm = TRUE),
+      xmax = max(.data[[x]], na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(xmin) %>%
+    mutate(Q = factor(paste0("Q", row_number()), levels = paste0("Q", 1:4)))
+  
+  if (is.null(binwidth)) {
+    # heuristic (works for std exposure and for sums)
+    binwidth <- (quantile(df[[x]], 0.95, na.rm=TRUE) - quantile(df[[x]], 0.05, na.rm=TRUE)) / 35
+  }
+  
+  ggplot(df, aes(x = .data[[x]])) +
+    geom_rect(
+      data = ranges,
+      aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = Q),
+      inherit.aes = FALSE, alpha = 0.15
+    ) +
+    geom_histogram(aes(y = after_stat(density)),
+                   binwidth = binwidth, fill = "grey80", color = "white", alpha = 0.9) +
+    geom_density(color = "black", linewidth = 0.8) +
+    scale_fill_brewer(palette = "Set2", name = NULL) +
+    labs(x = x, y = "Density", title = title) +
+    theme_minimal()
+}
+
+p_dist_ind <- plot_dist_quartiles(
+  df = model_data_q,
+  x = x_ind,
+  qvar = "treat_q",
+  title = paste0("Individual Exposure Distribution (", x_ind, ", Quartiles)")
+)
+p_dist_ind
+
+p_dist_couple <- plot_dist_quartiles(
+  df = couple_data_q,
+  x = "couple_exposure_sum",
+  qvar = "treat_q_couple",
+  title = "Couple Exposure Distribution (Exposure A + Exposure B, Quartiles)"
+)
+p_dist_couple
+
+# ----------------------------
+# 4) Quartile regressions
+# ----------------------------
+
+# INDIVIDUAL: Army ~ quartile dummies
+MUN_army_q <- feols(
+  army ~ i(treat_q, ref = 1) + female |
+    mun_birth_key + anio_nacimiento_filled,
+  data    = model_data_q,
+  cluster = ~ mun_birth_key + anio_nacimiento_filled + marriage_id
+)
+
+# COUPLE: Catholic_Marriage ~ quartile dummies of (A+B) exposure
+# (Keep your same FE and clustering as your municipality couple regression)
+MUN_catholic_couple_q <- feols(
+  Catholic_Marriage ~ i(treat_q_couple, ref = 1) |
+    mun_birth_key_A + mun_birth_key_B +
+    anio_nacimiento_filled_A + anio_nacimiento_filled_B,
+  data    = couple_data_q,
+  cluster = ~ mun_birth_key_A + mun_birth_key_B
+)
+
+# ----------------------------
+# 5) Table (LaTeX) like your others
+# ----------------------------
+modelsummary(
+  list(
+    "Army (Q bins, Mun FE)"           = MUN_army_q,
+    "Catholic (Q bins, Couple-level)" = MUN_catholic_couple_q
+  ),
+  output = "latex",
+  title  = "Non-parametric identification: quartiles of municipality exposure",
+  stars  = c("*"=.10, "**"=.05, "***"=.01),
+  coef_rename = c(
+    "treat_q::2"        = "Q2 vs Q1",
+    "treat_q::3"        = "Q3 vs Q1",
+    "treat_q::4"        = "Q4 vs Q1",
+    "treat_q_couple::2" = "Q2 vs Q1",
+    "treat_q_couple::3" = "Q3 vs Q1",
+    "treat_q_couple::4" = "Q4 vs Q1"
+  ),
+  gof_omit = "AIC|BIC|RMSE|Log.Lik|F|R2 Adj.|R2 Within|R2 Within Adj."
+)
+
+# ----------------------------
+# 6) Coefficient plots (point-range) + ADRF-style
+# ----------------------------
+coef_ind <- broom::tidy(MUN_army_q, conf.int = TRUE) %>%
+  filter(grepl("^treat_q::", term)) %>%
+  mutate(
+    Outcome = "Army (individual)",
+    Quartile = recode(term,
+                      "treat_q::2" = "Q2 vs Q1",
+                      "treat_q::3" = "Q3 vs Q1",
+                      "treat_q::4" = "Q4 vs Q1"
+    ),
+    treat_level = as.integer(gsub("treat_q::", "", term))
+  ) %>%
+  select(Outcome, Quartile, treat_level, estimate, conf.low, conf.high)
+
+coef_couple <- broom::tidy(MUN_catholic_couple_q, conf.int = TRUE) %>%
+  filter(grepl("^treat_q_couple::", term)) %>%
+  mutate(
+    Outcome = "Catholic union (couple)",
+    Quartile = recode(term,
+                      "treat_q_couple::2" = "Q2 vs Q1",
+                      "treat_q_couple::3" = "Q3 vs Q1",
+                      "treat_q_couple::4" = "Q4 vs Q1"
+    ),
+    treat_level = as.integer(gsub("treat_q_couple::", "", term))
+  ) %>%
+  select(Outcome, Quartile, treat_level, estimate, conf.low, conf.high)
+
+coef_all <- bind_rows(coef_ind, coef_couple)
+
+# Point-range figure
+ggplot(coef_all, aes(x = Quartile, y = estimate, ymin = conf.low, ymax = conf.high)) +
+  geom_pointrange() +
+  facet_wrap(~ Outcome, scales = "free_y") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Effects of Exposure Quartiles (vs Q1)",
+    y = "Coefficient (95% CI)", x = NULL
+  ) +
+  theme_minimal()
+
+# ADRF-style (add baseline bin=1 at zero)
+adrf_df <- coef_all %>%
+  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
+  bind_rows(
+    tibble(
+      Outcome = unique(coef_all$Outcome),
+      treat_level = 1L,
+      estimate = 0, conf.low = 0, conf.high = 0
+    )
+  )
+
+plot_adrf <- function(df, title) {
+  ggplot(df, aes(x = treat_level, y = estimate, group = Outcome)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey45", linewidth = 0.55) +
+    geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
+                  width = 0.10, color = "grey55", linewidth = 0.55) +
+    geom_line(linewidth = 0.95) +
+    geom_point(size = 2.2) +
+    facet_wrap(~ Outcome, scales = "free_y") +
+    scale_x_continuous(breaks = 1:4, labels = paste0("Q", 1:4)) +
+    scale_y_continuous(labels = label_number(accuracy = 0.01)) +
+    labs(title = title, x = NULL, y = "Estimated effect (vs Q1)") +
+    theme_minimal() +
+    theme(
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      strip.text = element_text(face = "bold"),
+      plot.title = element_text(face = "bold"),
+      legend.position = "none"
+    )
+}
+
+p_adrf <- plot_adrf(adrf_df, "ADRF-style plot: Exposure quartiles (vs Q1)")
+p_adrf
