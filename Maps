@@ -1,0 +1,429 @@
+# Load libraries
+library(tidyverse)
+library(sf)
+library(mapSpain)
+
+# === Load your data ===
+rain_data <- readr::read_csv(
+  "C:/Users/Saúl/Desktop/Semana Santa project/Grid precipitation/province_holy_week_summary.csv",
+  locale = readr::locale(encoding = "UTF-8")
+)
+
+# === Helper: robust normalizer for province names ===
+normalize_name <- function(x) {
+  x %>%
+    stringr::str_to_lower() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%  # remove accents
+    stringr::str_replace_all("[^a-z0-9]+", "")     # drop spaces & punctuation
+}
+
+# === Load mapSpain provinces and harmonize a few official spellings ===
+provinces <- esp_get_prov(moveCAN = TRUE) %>%
+  mutate(
+    ine.prov.name = case_when(
+      ine.prov.name == "Coruña, A" ~ "A Coruña",
+      ine.prov.name == "Rioja, La" ~ "La Rioja",
+      ine.prov.name == "Balears, Illes" ~ "Illes Balears",
+      ine.prov.name == "Palmas, Las" ~ "Las Palmas",
+      TRUE ~ ine.prov.name
+    )
+  )
+
+# Canonical keys from mapSpain names
+canon_map <- provinces %>%
+  st_drop_geometry() %>%
+  distinct(ine_name = ine.prov.name) %>%
+  mutate(key = normalize_name(ine_name))
+
+# --- NEW: add aliases for Alicante & Castellón (plus the earlier ones) ---
+alias_extra <- tibble(
+  alias = c(
+    # Basque Country
+    "Alava","Araba","Araba/Alava","Vizcaya","Guipuzcoa",
+    # Islands
+    "Baleares","Balears Illes",
+    # Valencia variants
+    "Valencia","Valencia/Valencia",
+    # Tenerife variants
+    "Sta. Cruz de Tenerife","Santa Cruz Tenerife",
+    # >>> Alicante / Castellón aliases <<<
+    "Alicante","Alacant","Alicante/Alacant",
+    "Castellon","Castello","Castellon/Castello","Castellon/Castello"
+  ),
+  ine_name = c(
+    # Basque targets
+    rep("Araba/Álava", 3), "Bizkaia","Gipuzkoa",
+    # Islands targets
+    "Illes Balears","Illes Balears",
+    # Valencia targets
+    "Valencia/València","Valencia/València",
+    # Tenerife targets
+    "Santa Cruz de Tenerife","Santa Cruz de Tenerife",
+    # >>> Alicante / Castellón targets <<<
+    rep("Alicante/Alacant", 3),
+    rep("Castellón/Castelló", 4)
+  )
+) %>%
+  mutate(key = normalize_name(alias)) %>%
+  select(key, ine_name)
+
+# Merge aliases FIRST so they take precedence, then canonical
+name_map <- bind_rows(alias_extra, canon_map %>% select(key, ine_name)) %>%
+  distinct(key, .keep_all = TRUE)
+
+# === Attach a normalized key to your data and map to official INE names ===
+rain_data2 <- rain_data %>%
+  mutate(key = normalize_name(provincia)) %>%
+  left_join(name_map, by = "key")
+
+# Quick check: any provinces still unmatched?
+unmatched <- rain_data2 %>%
+  filter(is.na(ine_name)) %>%
+  count(provincia, sort = TRUE)
+if (nrow(unmatched) > 0) {
+  message("Provinces not matched (showing counts):")
+  print(unmatched)
+}
+
+# === Province averages (only dry_days_1) ===
+rain_avg <- rain_data2 %>%
+  group_by(ine_name) %>%
+  summarize(
+    avg_dry_days_10 = mean(dry_days_10, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# === Merge map + data (province-level means) ===
+map_data <- provinces %>%
+  left_join(rain_avg, by = c("ine.prov.name" = "ine_name"))
+
+# Sanity check specifically for Alicante & Castellón
+map_data %>%
+  filter(ine.prov.name %in% c("Alicante/Alacant","Castellón/Castelló")) %>%
+  transmute(ine.prov.name, has_data = !is.na(avg_dry_days_10)) %>%
+  print(n = Inf)
+
+# === Map 1: average dry days (<1mm) ===
+ggplot(map_data) +
+  geom_sf(aes(fill = avg_dry_days_10)) +
+  scale_fill_distiller(palette = "RdBu", direction = -1, na.value = "grey90") +
+  labs(fill = "Avg dry days (<10mm)") +
+  theme_minimal()
+
+# === Per-year maps (still using dry_days_10) ===
+selected_years <- c(1970, 2000, 2020, 2024)
+
+rain_summary <- rain_data2 %>%
+  filter(year %in% selected_years) %>%
+  group_by(ine_name, year) %>%
+  summarize(dry_days_10 = mean(dry_days_10, na.rm = TRUE), .groups = "drop")
+
+map_data_selected <- provinces %>%
+  left_join(rain_summary, by = c("ine.prov.name" = "ine_name"))
+
+# Remove any unmatched rows so there's no extra "NA" facet
+ggplot(filter(map_data_selected, !is.na(year))) +
+  geom_sf(aes(fill = dry_days_10), color = "white", size = 0.2) +
+  scale_fill_distiller(palette = "RdBu", direction = -1, limits = c(0, 8), na.value = "grey90") +
+  facet_wrap(~ year, nrow = 2) +
+  labs(fill = "Dry days (<10mm)") +
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16),
+    strip.text  = element_text(size = 14),
+    legend.position = "right"
+  )
+
+
+# Build plot objects
+p_map_avg <- ggplot(map_data) +
+  geom_sf(aes(fill = avg_dry_days_10), color = "white", linewidth = 0.2) +
+  scale_fill_distiller(palette = "RdBu", direction = -1, na.value = "grey90") +
+  labs(fill = "Avg dry days (<10mm)") +
+  coord_sf(datum = NA) +
+  theme_minimal(base_size = 14)
+
+p_map_years <- ggplot(filter(map_data_selected, !is.na(year))) +
+  geom_sf(aes(fill = dry_days_10), color = "white", linewidth = 0.2) +
+  scale_fill_distiller(
+    palette = "RdBu",
+    direction = -1,
+    limits = c(0, 8),
+    na.value = "grey90"
+  ) +
+  facet_wrap(~ year, nrow = 2) +
+  labs(fill = "Dry days (<10mm)") +
+  coord_sf(datum = NA) +
+  theme_minimal(base_size = 14) +
+  theme(
+    strip.text = element_text(size = 13),
+    legend.position = "right"
+  )
+
+# Save as vector PDF (best default for LaTeX/Beamer)
+ggsave(
+  "map_avg_dry_days.pdf",
+  plot = p_map_avg,
+  device = cairo_pdf,
+  width = 10,
+  height = 6,
+  units = "in"
+)
+
+ggsave(
+  "map_selected_years.pdf",
+  plot = p_map_years,
+  device = cairo_pdf,
+  width = 10,
+  height = 7,
+  units = "in"
+)
+
+# Optional raster fallback if a map is too heavy in LaTeX
+ggsave(
+  "map_selected_years.png",
+  plot = p_map_years,
+  width = 10,
+  height = 7,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+# =========================================================
+# Maps of Spain:
+#   (1) Number of cofradías by province
+#   (2) Cofradías per 100,000 inhabitants by province
+#
+# Files:
+#   C:/Users/Saúl/Documents/2852.xlsx
+#   C:/Users/Saúl/Documents/cofradias_y_hermandades_por_provincia.csv
+# =========================================================
+
+library(tidyverse)
+library(sf)
+library(mapSpain)
+library(readxl)
+library(stringi)
+
+# === Paths ===
+pop_path  <- "C:/Users/Saúl/Documents/2852.xlsx"
+cofr_path <- "C:/Users/Saúl/Documents/cofradias_y_hermandades_por_provincia.csv"
+
+# === Helper: robust normalizer for province names ===
+normalize_name <- function(x) {
+  x %>%
+    as.character() %>%
+    stringr::str_to_lower() %>%
+    stringi::stri_trans_general("Latin-ASCII") %>%
+    stringr::str_replace_all("[^a-z0-9]+", "")
+}
+
+# === Load mapSpain provinces and harmonize official spellings ===
+provinces <- esp_get_prov(moveCAN = TRUE) %>%
+  mutate(
+    ine.prov.name = case_when(
+      ine.prov.name == "Coruña, A"      ~ "A Coruña",
+      ine.prov.name == "Rioja, La"      ~ "La Rioja",
+      ine.prov.name == "Balears, Illes" ~ "Illes Balears",
+      ine.prov.name == "Palmas, Las"    ~ "Las Palmas",
+      TRUE ~ ine.prov.name
+    )
+  )
+
+canon_map <- provinces %>%
+  st_drop_geometry() %>%
+  distinct(ine_name = ine.prov.name) %>%
+  mutate(key = normalize_name(ine_name))
+
+alias_extra <- tibble(
+  alias = c(
+    "Alava","Araba","Araba/Alava","Vizcaya","Guipuzcoa",
+    "Baleares","Balears Illes",
+    "Valencia","Valencia/Valencia",
+    "Sta. Cruz de Tenerife","Santa Cruz Tenerife",
+    "Alicante","Alacant","Alicante/Alacant",
+    "Castellon","Castello","Castellon/Castello","Castellón/Castelló",
+    "Coruna","Coruña","Coruña A",
+    "Rioja","Rioja La",
+    "Palmas","Palmas Las"
+  ),
+  ine_name = c(
+    rep("Araba/Álava", 3), "Bizkaia", "Gipuzkoa",
+    "Illes Balears", "Illes Balears",
+    "Valencia/València", "Valencia/València",
+    "Santa Cruz de Tenerife", "Santa Cruz de Tenerife",
+    rep("Alicante/Alacant", 3),
+    rep("Castellón/Castelló", 4),
+    "A Coruña", "A Coruña", "A Coruña",
+    "La Rioja", "La Rioja",
+    "Las Palmas", "Las Palmas"
+  )
+) %>%
+  mutate(key = normalize_name(alias)) %>%
+  select(key, ine_name)
+
+name_map <- bind_rows(alias_extra, canon_map %>% select(key, ine_name)) %>%
+  distinct(key, .keep_all = TRUE)
+
+# =========================================================
+# 1) Population data
+# Actual file structure:
+# - header rows at top
+# - province names start on row 9
+# - only 2 columns
+# - year shown in file: 2021
+# =========================================================
+
+pop_df <- read_excel(
+  pop_path,
+  sheet = 1,
+  skip = 8,
+  col_names = c("provincia_raw", "population")
+) %>%
+  mutate(
+    provincia_raw = as.character(provincia_raw),
+    population = suppressWarnings(as.numeric(population))
+  ) %>%
+  filter(!is.na(provincia_raw), !is.na(population)) %>%
+  filter(provincia_raw != "Total") %>%
+  mutate(
+    provincia_clean = stringr::str_trim(stringr::str_remove(provincia_raw, "^\\d{1,2}\\s+")),
+    key = normalize_name(provincia_clean)
+  ) %>%
+  left_join(name_map, by = "key") %>%
+  mutate(provincia = coalesce(ine_name, provincia_clean)) %>%
+  select(provincia, population)
+
+# =========================================================
+# 2) Cofradías data
+# Actual file contains:
+# provincia, n_cofradias, n_localidades, n_localidades_con_datos
+# There is NO separate hermandades column in the uploaded CSV
+# =========================================================
+
+cofr_df <- readr::read_csv(
+  cofr_path,
+  locale = readr::locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+) %>%
+  mutate(
+    provincia = as.character(provincia),
+    n_cofradias = as.numeric(n_cofradias),
+    key = normalize_name(provincia)
+  ) %>%
+  left_join(name_map, by = "key") %>%
+  mutate(provincia_final = coalesce(ine_name, provincia)) %>%
+  group_by(provincia_final) %>%
+  summarise(
+    n_cofradias = sum(n_cofradias, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rename(provincia = provincia_final)
+
+# =========================================================
+# 3) Merge and create rate
+# =========================================================
+
+cofr_pop <- cofr_df %>%
+  left_join(pop_df, by = "provincia") %>%
+  mutate(
+    cofradias_per_100k = 100000 * n_cofradias / population
+  )
+
+# Check unmatched provinces
+unmatched <- cofr_pop %>% filter(is.na(population))
+if (nrow(unmatched) > 0) {
+  message("Unmatched provinces in population merge:")
+  print(unmatched)
+}
+
+# Merge with map
+map_data <- provinces %>%
+  left_join(cofr_pop, by = c("ine.prov.name" = "provincia"))
+
+# =========================================================
+# 4) Plot 1: absolute number of cofradías
+# =========================================================
+
+p_abs <- ggplot(map_data) +
+  geom_sf(aes(fill = n_cofradias), color = "white", linewidth = 0.2) +
+  scale_fill_distiller(
+    palette = "RdBu",
+    direction = -1,
+    na.value = "grey90"
+  ) +
+  labs(fill = "number of \nbrotherhoods") +
+  coord_sf(datum = NA) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# =========================================================
+# 5) Plot 2: cofradías per 100,000 inhabitants
+# =========================================================
+
+p_per100k <- ggplot(map_data) +
+  geom_sf(aes(fill = cofradias_per_100k), color = "white", linewidth = 0.2) +
+  scale_fill_distiller(
+    palette = "RdBu",
+    direction = -1,
+    na.value = "grey90"
+  ) +
+  labs(fill = "Cofradías by \n100.000 pop.") +
+  coord_sf(datum = NA) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_abs)
+print(p_per100k)
+
+# =========================================================
+# 6) Save high-quality outputs for LaTeX / Beamer
+# =========================================================
+
+ggsave(
+  filename = "C:/Users/Saúl/Documents/map_cofradias_absolute.pdf",
+  plot = p_abs,
+  device = cairo_pdf,
+  width = 10,
+  height = 6,
+  units = "in"
+)
+
+ggsave(
+  filename = "C:/Users/Saúl/Documents/map_cofradias_per100k.pdf",
+  plot = p_per100k,
+  device = cairo_pdf,
+  width = 10,
+  height = 6,
+  units = "in"
+)
+
+ggsave(
+  filename = "C:/Users/Saúl/Documents/map_cofradias_absolute.png",
+  plot = p_abs,
+  width = 10,
+  height = 6,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
+
+ggsave(
+  filename = "C:/Users/Saúl/Documents/map_cofradias_per100k.png",
+  plot = p_per100k,
+  width = 10,
+  height = 6,
+  units = "in",
+  dpi = 600,
+  bg = "white"
+)
