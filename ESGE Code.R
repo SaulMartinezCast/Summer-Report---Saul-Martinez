@@ -14,7 +14,7 @@ library(modelsummary)
 library(tidyr)
 library(ggplot2)
 library(stringi)
-library(data.table)   # ✅ needed for fast rolling join (population at birth)
+library(data.table)  
 
 # Clean environment
 rm(list = ls())
@@ -79,7 +79,10 @@ alias_extra <- tibble::tibble(
     "Valencia","Valencia/Valencia",
     "Sta. Cruz de Tenerife","Santa Cruz Tenerife",
     "Alicante","Alacant","Alicante/Alacant",
-    "Castellon","Castello","Castellon/Castello","Castellón/Castelló"
+    "Castellon","Castello","Castellon/Castello","Castellón/Castelló",
+    "Coruña, A",
+    "Rioja, La",
+    "Palmas, Las"
   ),
   ine_name = c(
     rep("Araba/Álava", 3), "Bizkaia","Gipuzkoa",
@@ -87,11 +90,16 @@ alias_extra <- tibble::tibble(
     "Valencia/València","Valencia/València",
     "Santa Cruz de Tenerife","Santa Cruz de Tenerife",
     rep("Alicante/Alacant", 3),
-    rep("Castellón/Castelló", 4)
+    rep("Castellón/Castelló", 4),
+    
+    "A Coruña",
+    "La Rioja",
+    "Las Palmas"
   )
 ) %>%
   mutate(key = normalize_name(alias)) %>%
   select(key, ine_name)
+
 
 name_map <- bind_rows(
   canon_map %>% select(key, ine_name),
@@ -132,7 +140,7 @@ if (nrow(unmatched) > 0) {
 }
 
 
-# ✅ POPULATION LOADING (FIXED for your INE excel structure)
+# POPULATION LOADING (FIXED for your INE excel structure)
 
 
 clean_pop_num <- function(x) {
@@ -152,10 +160,19 @@ load_pop_1900_1991 <- function(path) {
       values_to = "population"
     ) %>%
     mutate(
-      year = suppressWarnings(as.integer(str_extract(as.character(year), "\\d{4}"))),
+      year = suppressWarnings(as.integer(stringr::str_extract(as.character(year), "\\d{4}"))),
       population = clean_pop_num(population),
-      provincia_name = str_trim(str_remove(provincia, "^\\d{1,2}\\s+")),
-      provincia_norm = normalize_name(provincia_name)
+      
+      # strip leading INE numeric code
+      provincia_name = stringr::str_trim(stringr::str_remove(provincia, "^\\d{1,2}\\s+")),
+      
+      # map aliases -> official names (same as rain)
+      key = normalize_name(provincia_name)
+    ) %>%
+    left_join(name_map, by = "key") %>%
+    mutate(
+      provincia_official = dplyr::coalesce(ine_name, provincia_name),
+      provincia_norm = normalize_name(provincia_official)
     ) %>%
     filter(!is.na(year)) %>%
     left_join(prov_code_map %>% select(prov_nac, provincia_norm), by = "provincia_norm") %>%
@@ -180,10 +197,16 @@ load_pop_1996_2022 <- function(path) {
       values_to = "population"
     ) %>%
     mutate(
-      year = suppressWarnings(as.integer(str_extract(as.character(year), "\\d{4}"))),
+      year = suppressWarnings(as.integer(stringr::str_extract(as.character(year), "\\d{4}"))),
       population = clean_pop_num(population),
-      provincia_name = str_trim(str_remove(provincia, "^\\d{1,2}\\s+")),
-      provincia_norm = normalize_name(provincia_name)
+      
+      provincia_name = stringr::str_trim(stringr::str_remove(provincia, "^\\d{1,2}\\s+")),
+      key = normalize_name(provincia_name)
+    ) %>%
+    left_join(name_map, by = "key") %>%
+    mutate(
+      provincia_official = dplyr::coalesce(ine_name, provincia_name),
+      provincia_norm = normalize_name(provincia_official)
     ) %>%
     filter(!is.na(year)) %>%
     left_join(prov_code_map %>% select(prov_nac, provincia_norm), by = "provincia_norm") %>%
@@ -194,6 +217,7 @@ load_pop_1996_2022 <- function(path) {
       population = as.numeric(population)
     )
 }
+
 
 
 # Build province-year population panel (for rolling join later)
@@ -212,6 +236,24 @@ pop_panel %>%
     min_year = min(year, na.rm = TRUE),
     max_year = max(year, na.rm = TRUE)
   )
+
+
+# what province codes exist in the canonical map?
+all_prov <- prov_code_map %>%
+  distinct(prov_nac, provincia_official, provincia_norm) %>%
+  arrange(prov_nac)
+
+# what province codes exist in population panel?
+pop_prov <- pop_panel %>%
+  distinct(prov_nac) %>%
+  arrange(prov_nac)
+
+# which are missing from pop_panel?
+missing_from_pop <- anti_join(all_prov, pop_prov, by = "prov_nac")
+
+missing_from_pop
+nrow(missing_from_pop)
+
 
 harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
   
@@ -289,7 +331,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
         MOTHER_BORN_SPAIN = case_when(P14C == 1 ~ 1, P14C == 2 ~ 0, TRUE ~ NA_integer_),
         FATHER_SCHOOL = case_when(P15M == 3 ~ 1, P15M %in% c(0, 1, 2) ~ 0, TRUE ~ NA_integer_),
         FATHER_EDUCATION = case_when(
-          P15M != 3 ~ 1,
+          P15M %in% c(1,2) ~ 1,
           P15N02 == 1 ~ 1,
           P15N02 == 2 ~ 2,
           P15N02 %in% c(3,4) ~ 3,
@@ -302,7 +344,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
         ),
         MOTHER_SCHOOL = case_when(P14M == 3 ~ 1, P14M %in% c(0, 1, 2) ~ 0, TRUE ~ NA_integer_),
         MOTHER_EDUCATION = case_when(
-          P14M != 3 ~ 1,
+          P14M %in% c(1,2) ~ 1,
           P14N02 == 1 ~ 1,
           P14N02 == 2 ~ 2,
           P14N02 %in% c(3,4) ~ 3,
@@ -406,7 +448,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
         MOTHER_BORN_SPAIN = case_when(P42C == 1 ~ 1, P42C == 2 ~ 0, TRUE ~ NA_integer_),
         FATHER_SCHOOL = case_when(P43J == 3 ~ 1, P43J %in% c(0,1,2) ~ 0, TRUE ~ NA_integer_),
         FATHER_EDUCATION = case_when(
-          P43J != 3 ~ 1,
+          P43J %in% c(1,2) ~ 1,
           P43K == 1 ~ 1,
           P43K == 2 ~ 2,
           P43K %in% c(3,4) ~ 3,
@@ -419,7 +461,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
         ),
         MOTHER_SCHOOL = case_when(P42J == 3 ~ 1, P42J %in% c(0,1,2) ~ 0, TRUE ~ NA_integer_),
         MOTHER_EDUCATION = case_when(
-          P42J != 3 ~ 1,
+          P42J %in% c(1,2) ~ 1,
           P42K == 1 ~ 1,
           P42K == 2 ~ 2,
           P42K %in% c(3,4) ~ 3,
@@ -523,7 +565,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
         MOTHER_BORN_SPAIN = case_when(P26C == 1 ~ 1, P26C == 2 ~ 0, TRUE ~ NA_integer_),
         FATHER_SCHOOL = case_when(P27J == 3 ~ 1, P27J %in% c(0,1,2) ~ 0, TRUE ~ NA_integer_),
         FATHER_EDUCATION = case_when(
-          P27J != 3 ~ 1,
+          P27J %in% c(1,2) ~ 1,
           P27K == 1 ~ 1,
           P27K == 2 ~ 2,
           P27K %in% c(3,4) ~ 3,
@@ -536,7 +578,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
         ),
         MOTHER_SCHOOL = case_when(P26J == 3 ~ 1, P26J %in% c(0,1,2) ~ 0, TRUE ~ NA_integer_),
         MOTHER_EDUCATION = case_when(
-          P26J != 3 ~ 1,
+          P26J %in% c(1,2) ~ 1,
           P26K == 1 ~ 1,
           P26K == 2 ~ 2,
           P26K %in% c(3,4) ~ 3,
@@ -606,7 +648,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
         CATHOLIC_SCHOOL = NA_real_,
         CONSERVATIVE_VOTE = case_when(
           RECUERDO %in% c(16, 17, 99, 98, 0) ~ NA_real_,
-          RECUERDO %in% c(2, 6, 9, 10, 12) ~ 1,
+          RECUERDO %in% c(2, 6, 9, 10) ~ 1,
           TRUE ~ 0
         ),
         PP_VOTE = case_when(
@@ -747,7 +789,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
           
           CONSERVATIVE_VOTE = case_when(
             RECUERDO %in% c(95, 94, 90, 98, 99, 0, 97) ~ NA_real_,
-            RECUERDO %in% c(1, 3, 7, 9, 12) ~ 1,
+            RECUERDO %in% c(1, 3, 7, 9) ~ 1,
             TRUE ~ 0
           ),
           PP_VOTE = case_when(
@@ -892,7 +934,7 @@ harmonize <- function(df, year, survey_year = year, wave_2024 = NA_integer_) {
           
           CONSERVATIVE_VOTE = case_when(
             RECUERDO %in% c(95, 94, 90, 98, 99, 0, 97) ~ NA_real_,
-            RECUERDO %in% c(1, 3, 7, 9, 12) ~ 1,
+            RECUERDO %in% c(1, 3, 7, 9) ~ 1,
             TRUE ~ 0
           ),
           PP_VOTE = case_when(
@@ -1196,7 +1238,7 @@ check_cov %>%
   summarise(
     n = n(),
     median_coverage = median(coverage_ratio, na.rm = TRUE),
-    share_cov_lt80  = mean(coverage_ratio < 0.8, na.rm = TRUE),
+    share_cov_lt80  = mean(coverage_ratio < 0.9, na.rm = TRUE),
     cor_low         = cor(coverage_ratio, childhood_total_dry_days, use = "complete.obs")
   )
 
@@ -1212,8 +1254,8 @@ print(missing_provinces)
 # Final merge 
 survey_final <- left_join(survey_clean, results, by = "respondent_id") %>%
   mutate(age = survey_year - BIRTH) %>%
-  filter(BIRTH >= 1934
-         , BIRTH <= 2004)
+  filter(BIRTH >= 1920
+         , BIRTH <= 2008)
 
 survey_final %>%
   summarise(
@@ -1394,116 +1436,16 @@ tab1 <- lapply(vars_all, function(v) {
     across(c(Min, Mean, Max), ~ round(.x, 2))
   )
 
-# 5) LaTeX output ---------------------------------------------------------
-latex_tab <- kbl(
-  tab1,
-  format = "latex",
-  booktabs = TRUE,
-  longtable = FALSE,
-  caption = "Summary statistics (analysis sample).",
-  align = "lrrrrp{7.5cm}"
-) %>%
-  kable_styling(latex_options = c("hold_position"), font_size = 9) %>%
-  column_spec(1, width = "3.5cm") %>%
-  column_spec(6, width = "8cm") %>%
-  row_spec(0, bold = TRUE)
-
-# Wrap with resizebox (works even with p{...})
-cat(paste0("\\resizebox{\\textwidth}{!}{%\n", latex_tab, "\n}\n"))
 
 
 # ROBUSTNESS: Balance of observables across treatment quartiles --------------------
 
-
 library(dplyr)
 library(tidyr)
 library(fixest)
-library(ggplot2)
+library(kableExtra)
 
-
-# 0) Load + build analysis sample
-survey <- readr::read_csv("survey_with_childhood_weather_harmonized.csv")
-
-model_data <- survey %>%
-  filter(
-    BORN_SPAIN == 1,
-    !is.na(childhood_total_dry_days),
-    childhood_total_dry_days != 0
-  ) %>%
-  mutate(
-    # Standardize treatment (pooled sample)
-    treat_std = (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
-      sd(childhood_total_dry_days, na.rm = TRUE),
-    treat_q = ntile(treat_std, 4)
-  )
-
-# Choose observables (edit to match what you want in the paper)
-balance_vars <- c(
-  "FEMALE",
-  "age",
-  "EDUCATION",
-  "INCOME",
-  "FATHER_BORN_SPAIN",
-  "MOTHER_BORN_SPAIN",
-  "FATHER_EMPLOYMENT",
-  "MOTHER_EMPLOYMENT",
-  "FATHER_SCHOOL",
-  "MOTHER_SCHOOL",
-  "FATHER_CATHOLIC",
-  "MOTHER_CATHOLIC", 
-  "survey_year", 
-  "pop_birth_last_census",
-  "SAME_LOC_BIRTH"
-)
-
-# Keep only existing vars (safe)
-balance_vars <- balance_vars[balance_vars %in% names(model_data)]
-
-
-# 1) Helper: standardized diff (Q1 vs Q4)
-std_diff_q1_q4 <- function(x, q) {
-  x1 <- x[q == 1]
-  x4 <- x[q == 4]
-  m1 <- mean(x1, na.rm = TRUE)
-  m4 <- mean(x4, na.rm = TRUE)
-  s  <- sqrt((var(x1, na.rm = TRUE) + var(x4, na.rm = TRUE)) / 2)
-  if (is.na(s) || s == 0) return(NA_real_)
-  abs((m4 - m1) / s)  # absolute standardized difference
-}
-
-
-# 2) Compute RAW standardized differences
-
-raw_smd <- sapply(balance_vars, function(v) {
-  std_diff_q1_q4(model_data[[v]], model_data$treat_q)
-})
-
-
-# 3) Residualize each covariate on FE, then compute SMD
-
-fe_smd <- sapply(balance_vars, function(v) {
-  
-  # residualize v with same FE used in main regressions
-  # (cluster not needed for residuals)
-  m <- feols(as.formula(paste0(v, " ~ 1 | BIRTH + prov_nac")), data = model_data)
-  
-  v_resid <- residuals(m)
-  
-  std_diff_q1_q4(v_resid, model_data$treat_q)
-})
-
-# 4) Build plotting dataframe
-balance_plot <- tibble(
-  variable = balance_vars,
-  Raw      = raw_smd,
-  `After FE (BIRTH + prov)` = fe_smd
-) %>%
-  pivot_longer(-variable, names_to = "spec", values_to = "smd") %>%
-  mutate(variable = factor(variable, levels = rev(balance_vars)))
-
-library(forcats)
-
-# --- Optional prettier labels (include EVERYTHING you plot) ---
+# --- Pretty labels (same as plot) ---
 pretty_labels <- c(
   FEMALE = "Female",
   age = "Age",
@@ -1522,25 +1464,132 @@ pretty_labels <- c(
   SAME_LOC_BIRTH = "Same province at birth"
 )
 
-# --- Apply labels AND enforce ordering correctly ---
-balance_plot <- balance_plot %>%
+# 1) Helpers
+
+mean_by_q <- function(x, q, k) mean(x[q == k], na.rm = TRUE)
+
+# standardized diff vs Q1 using SD(Q1)
+std_diff_vs_q1 <- function(x, q, k) {
+  x1 <- x[q == 1]
+  xk <- x[q == k]
+  m1 <- mean(x1, na.rm = TRUE)
+  mk <- mean(xk, na.rm = TRUE)
+  s1 <- sd(x1, na.rm = TRUE)
+  if (is.na(s1) || s1 == 0) return(NA_real_)
+  (mk - m1) / s1
+}
+
+
+# 2) Means by quartile (raw)
+
+means_raw <- lapply(balance_vars, function(v) {
+  tibble(
+    variable = v,
+    Q1 = mean_by_q(model_data[[v]], model_data$treat_q, 1),
+    Q2 = mean_by_q(model_data[[v]], model_data$treat_q, 2),
+    Q3 = mean_by_q(model_data[[v]], model_data$treat_q, 3),
+    Q4 = mean_by_q(model_data[[v]], model_data$treat_q, 4)
+  )
+}) %>% bind_rows()
+
+
+# 3) Std diffs vs Q1 (raw)
+
+smd_raw <- lapply(balance_vars, function(v) {
+  tibble(
+    variable = v,
+    Raw_Q2vsQ1 = std_diff_vs_q1(model_data[[v]], model_data$treat_q, 2),
+    Raw_Q3vsQ1 = std_diff_vs_q1(model_data[[v]], model_data$treat_q, 3),
+    Raw_Q4vsQ1 = std_diff_vs_q1(model_data[[v]], model_data$treat_q, 4)
+  )
+}) %>% bind_rows()
+
+
+# BALANCE PLOT + BALANCE TABLE (consistent definitions)
+
+
+# 0) Load + build analysis sample
+
+survey <- readr::read_csv("survey_with_childhood_weather_harmonized.csv")
+
+model_data <- survey %>%
+  filter(
+    BORN_SPAIN == 1,
+    !is.na(childhood_total_dry_days),
+    childhood_total_dry_days != 0
+  ) %>%
   mutate(
-    # recode variable names
-    variable = recode(as.character(variable), !!!pretty_labels),
-    # enforce y-axis order using the (recoded) labels
+    treat_std = (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
+      sd(childhood_total_dry_days, na.rm = TRUE),
+    treat_q = ntile(treat_std, 4)
+  )
+
+balance_vars <- c(
+  "FEMALE","age","EDUCATION","INCOME",
+  "FATHER_BORN_SPAIN","MOTHER_BORN_SPAIN",
+  "FATHER_EMPLOYMENT","MOTHER_EMPLOYMENT",
+  "FATHER_SCHOOL","MOTHER_SCHOOL",
+  "FATHER_CATHOLIC","MOTHER_CATHOLIC",
+  "survey_year","pop_birth_last_census","SAME_LOC_BIRTH"
+)
+balance_vars <- balance_vars[balance_vars %in% names(model_data)]
+
+pretty_labels <- c(
+  FEMALE = "Female",
+  age = "Age",
+  EDUCATION = "Education",
+  INCOME = "Income",
+  FATHER_BORN_SPAIN = "Father born in Spain",
+  MOTHER_BORN_SPAIN = "Mother born in Spain",
+  FATHER_EMPLOYMENT = "Father employed",
+  MOTHER_EMPLOYMENT = "Mother employed",
+  FATHER_SCHOOL = "Father attended school",
+  MOTHER_SCHOOL = "Mother attended school",
+  FATHER_CATHOLIC = "Father Catholic",
+  MOTHER_CATHOLIC = "Mother Catholic",
+  survey_year = "Survey year",
+  pop_birth_last_census = "Province population",
+  SAME_LOC_BIRTH = "Same province at birth"
+)
+
+
+# 1) PLOT: Absolute SMD Q1 vs Q4 (Raw vs After FE)
+
+std_diff_q1_q4_abs <- function(x, q) {
+  x1 <- x[q == 1]
+  x4 <- x[q == 4]
+  m1 <- mean(x1, na.rm = TRUE)
+  m4 <- mean(x4, na.rm = TRUE)
+  s  <- sqrt((var(x1, na.rm = TRUE) + var(x4, na.rm = TRUE)) / 2)
+  if (is.na(s) || s == 0) return(NA_real_)
+  abs((m4 - m1) / s)
+}
+
+raw_smd <- sapply(balance_vars, function(v) {
+  std_diff_q1_q4_abs(model_data[[v]], model_data$treat_q)
+})
+
+fe_smd <- sapply(balance_vars, function(v) {
+  m <- feols(as.formula(paste0(v, " ~ 1 | BIRTH + prov_nac")), data = model_data)
+  v_resid <- residuals(m)
+  std_diff_q1_q4_abs(v_resid, model_data$treat_q)
+})
+
+balance_plot <- tibble(
+  variable = balance_vars,
+  Raw      = raw_smd,
+  `After FE (Birth year + province)` = fe_smd
+) %>%
+  pivot_longer(-variable, names_to = "spec", values_to = "smd") %>%
+  mutate(
+    variable = recode(variable, !!!pretty_labels),
     variable = factor(variable, levels = rev(pretty_labels[balance_vars])),
-    # ensure spec order for legend/colors
     spec = factor(spec, levels = c("Raw", "After FE (Birth year + province)"))
   )
 
-# --- Plot (LaTeX-ready) ---
 p_balance <- ggplot(balance_plot, aes(x = smd, y = variable, color = spec, shape = spec)) +
   geom_point(size = 2.8) +
   geom_vline(xintercept = 0.10, linetype = "dashed") +
-  scale_color_manual(values = c(
-    "Raw" = "orange",
-    "After FE (Birth year + province)" = "blue"
-  )) +
   labs(
     title = "Balance of observables across treatment quartiles",
     subtitle = "Absolute standardized difference between Q1 and Q4 (Raw vs FE)",
@@ -1558,74 +1607,14 @@ p_balance <- ggplot(balance_plot, aes(x = smd, y = variable, color = spec, shape
 
 print(p_balance)
 
-# ROBUSTNESS TABLE (LaTeX-ready):
-
-library(dplyr)
-library(tidyr)
-library(fixest)
-library(kableExtra)
+# optional: export figure for LaTeX
+ggsave("balance_plot.png", p_balance, width = 9, height = 5, dpi = 300)
 
 
-# 0) Load + build analysis sample
-
-survey <- readr::read_csv("survey_with_childhood_weather_harmonized.csv")
-
-balance_data <- survey %>%
-  filter(
-    BORN_SPAIN == 1,
-    !is.na(childhood_total_dry_days),
-    childhood_total_dry_days != 0
-  ) %>%
-  mutate(
-    treat_std = (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
-      sd(childhood_total_dry_days, na.rm = TRUE),
-    treat_q = ntile(treat_std, 4)
-  )
-
-balance_vars <- c(
-  "FEMALE",
-  "age",
-  "EDUCATION",
-  "INCOME",
-  "FATHER_BORN_SPAIN",
-  "MOTHER_BORN_SPAIN",
-  "FATHER_EMPLOYMENT",
-  "MOTHER_EMPLOYMENT",
-  "FATHER_SCHOOL",
-  "MOTHER_SCHOOL",
-  "FATHER_CATHOLIC",
-  "MOTHER_CATHOLIC",
-  "survey_year",
-  "pop_birth_last_census",
-  "SAME_LOC_BIRTH"
-)
-
-balance_vars <- balance_vars[balance_vars %in% names(balance_data)]
-
-pretty_labels <- c(
-  FEMALE = "Female",
-  age = "Age",
-  EDUCATION = "Education",
-  INCOME = "Income",
-  FATHER_BORN_SPAIN = "Father born in Spain",
-  MOTHER_BORN_SPAIN = "Mother born in Spain",
-  FATHER_EMPLOYMENT = "Father employed",
-  MOTHER_EMPLOYMENT = "Mother employed",
-  FATHER_SCHOOL = "Father school",
-  MOTHER_SCHOOL = "Mother school",
-  FATHER_CATHOLIC = "Father Catholic",
-  MOTHER_CATHOLIC = "Mother Catholic",
-  survey_year = "Survey year",
-  pop_birth_last_census = "Province population at birth", 
-  SAME_LOC_BIRTH = "Dummy living province of birth" 
-)
-
-
-# 1) Helpers
+# 2) TABLE: Means Q1–Q4 + Std diff vs Q1 (Raw + After FE)
 
 mean_by_q <- function(x, q, k) mean(x[q == k], na.rm = TRUE)
 
-# standardized diff vs Q1 using SD(Q1)
 std_diff_vs_q1 <- function(x, q, k) {
   x1 <- x[q == 1]
   xk <- x[q == k]
@@ -1636,75 +1625,56 @@ std_diff_vs_q1 <- function(x, q, k) {
   (mk - m1) / s1
 }
 
-
-# 2) Raw means (Q1–Q4)
-
 means_raw <- lapply(balance_vars, function(v) {
   tibble(
     variable = v,
-    Q1 = mean_by_q(balance_data[[v]], balance_data$treat_q, 1),
-    Q2 = mean_by_q(balance_data[[v]], balance_data$treat_q, 2),
-    Q3 = mean_by_q(balance_data[[v]], balance_data$treat_q, 3),
-    Q4 = mean_by_q(balance_data[[v]], balance_data$treat_q, 4)
+    Q1 = mean_by_q(model_data[[v]], model_data$treat_q, 1),
+    Q2 = mean_by_q(model_data[[v]], model_data$treat_q, 2),
+    Q3 = mean_by_q(model_data[[v]], model_data$treat_q, 3),
+    Q4 = mean_by_q(model_data[[v]], model_data$treat_q, 4)
   )
-}) |> bind_rows()
+}) %>% bind_rows()
 
-
-# 3) Raw standardized diffs vs Q1
-
-smd_raw <- lapply(balance_vars, function(v) {
+smd_raw_tbl <- lapply(balance_vars, function(v) {
   tibble(
     variable = v,
-    Raw_Q2vsQ1 = std_diff_vs_q1(balance_data[[v]], balance_data$treat_q, 2),
-    Raw_Q3vsQ1 = std_diff_vs_q1(balance_data[[v]], balance_data$treat_q, 3),
-    Raw_Q4vsQ1 = std_diff_vs_q1(balance_data[[v]], balance_data$treat_q, 4)
+    Raw_Q2vsQ1 = std_diff_vs_q1(model_data[[v]], model_data$treat_q, 2),
+    Raw_Q3vsQ1 = std_diff_vs_q1(model_data[[v]], model_data$treat_q, 3),
+    Raw_Q4vsQ1 = std_diff_vs_q1(model_data[[v]], model_data$treat_q, 4)
   )
-}) |> bind_rows()
+}) %>% bind_rows()
 
-
-# 4) FE-residualized standardized diffs vs Q1
-
-smd_fe <- lapply(balance_vars, function(v) {
-  
-  fe_mod <- feols(
-    as.formula(paste0(v, " ~ 1 | BIRTH + prov_nac")),
-    data = balance_data
-  )
-  x_res <- residuals(fe_mod)
+smd_fe_tbl <- lapply(balance_vars, function(v) {
+  fe_mod <- feols(as.formula(paste0(v, " ~ 1 | BIRTH + prov_nac")), data = model_data)
+  x_res  <- residuals(fe_mod)
   
   tibble(
     variable = v,
-    FE_Q2vsQ1 = std_diff_vs_q1(x_res, balance_data$treat_q, 2),
-    FE_Q3vsQ1 = std_diff_vs_q1(x_res, balance_data$treat_q, 3),
-    FE_Q4vsQ1 = std_diff_vs_q1(x_res, balance_data$treat_q, 4)
+    FE_Q2vsQ1 = std_diff_vs_q1(x_res, model_data$treat_q, 2),
+    FE_Q3vsQ1 = std_diff_vs_q1(x_res, model_data$treat_q, 3),
+    FE_Q4vsQ1 = std_diff_vs_q1(x_res, model_data$treat_q, 4)
   )
-}) |> bind_rows()
-
-
-# 5) Merge + labels + add Ns
-
-n_by_q <- balance_data %>% count(treat_q) %>% arrange(treat_q) %>% pull(n)
+}) %>% bind_rows()
 
 tab <- means_raw %>%
-  left_join(smd_raw, by = "variable") %>%
-  left_join(smd_fe,  by = "variable") %>%
-  mutate(variable = recode(variable, !!!pretty_labels)) %>%
-  relocate(variable)
+  left_join(smd_raw_tbl, by = "variable") %>%
+  left_join(smd_fe_tbl,  by = "variable") %>%
+  mutate(
+    variable = recode(variable, !!!pretty_labels),
+    variable = factor(variable, levels = pretty_labels[balance_vars])
+  ) %>%
+  arrange(variable) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  mutate(variable = as.character(variable)) %>%
+  rename(Variable = variable)
 
-# Optional: round nicely (keep numeric as numeric)
-tab_out <- tab %>%
-  mutate(across(where(is.numeric), ~ round(.x, 3)))
+n_by_q <- model_data %>% count(treat_q) %>% arrange(treat_q) %>% pull(n)
 
-
-# 6) LaTeX table with clean grouping
-
-# Build the dynamic label first
 means_lab <- sprintf(
   "Means by quartile (n = %d, %d, %d, %d)",
   n_by_q[1], n_by_q[2], n_by_q[3], n_by_q[4]
 )
 
-# Now build the header vector (names must be literal strings)
 header_vec <- c(
   " " = 1,
   setNames(4, means_lab),
@@ -1712,17 +1682,23 @@ header_vec <- c(
   "Std. diff vs Q1 (After FE)" = 3
 )
 
-# Use it
-kbl(
-  tab_out,
-  format = "latex",
+balance_table_latex <- kbl(
+  tab,
+  format   = "latex",
   booktabs = TRUE,
-  caption = "Balance of observables across quartiles of childhood dry days. Columns Q1--Q4 report raw means by quartile. Columns Raw and After FE report standardized differences relative to Q1, using SD(Q1). After FE residualizes each observable on birth-year and province fixed effects.",
-  align = "lrrrrrrr"
+  align    = "lrrrrrrr",
+  caption  = paste(
+    "Balance of observables across quartiles of childhood dry days.",
+    "Columns Q1--Q4 report raw means by treatment quartile.",
+    "Columns 'Std. diff vs Q1 (Raw)' and 'Std. diff vs Q1 (After FE)' report",
+    "standardized differences relative to Q1 using SD(Q1).",
+    "After FE residualizes each covariate on birth-year and province fixed effects."
+  )
 ) %>%
   add_header_above(header_vec) %>%
   kable_styling(latex_options = c("hold_position", "scale_down"))
 
+balance_table_latex
 
 
 # Covariate Balance table -------------------------------------------------
@@ -1848,7 +1824,7 @@ model_data <- survey %>%
                 FATHER_BORN_SPAIN, FATHER_SCHOOL, FATHER_EDUCATION,
                 FATHER_EMPLOYMENT, FATHER_EMPLOYMENT_TYPE, FATHER_CATHOLIC,
                 MOTHER_BORN_SPAIN, MOTHER_SCHOOL, MOTHER_EDUCATION,
-                MOTHER_EMPLOYMENT, MOTHER_CATHOLIC, birth_prov_cluster, COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE, PUBLIC_SECTOR_EMP, MERITOCRACY_BELIEF, SUBJECTIVE_CLASS, FAR_RIGHT_VOTE, CONSERVATIVE_VOTE, TRUST_PEOPLE, RELIGIOUS_PRACTICE, PARTICIPATION, SIZE_TOWN, pop_birth_last_census)
+                MOTHER_EMPLOYMENT, INCOME, MOTHER_CATHOLIC, birth_prov_cluster, EDUCATION, COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE, PUBLIC_SECTOR_EMP, MERITOCRACY_BELIEF, SUBJECTIVE_CLASS, FAR_RIGHT_VOTE, CONSERVATIVE_VOTE, TRUST_PEOPLE, RELIGIOUS_PRACTICE, PARTICIPATION, SIZE_TOWN, pop_birth_last_census, SAME_LOC_BIRTH)
 
 # Summary statistics (before standardization)
 summary_stats <- model_data %>%
@@ -2015,8 +1991,299 @@ kbl(
 
 library(dplyr); library(tidyr); library(fixest); library(kableExtra); library(tibble)
 
+library(dplyr)
+library(tidyr)
+
+na_balance_overall <- model_data %>%
+  summarise(across(
+    all_of(balance_vars),
+    list(
+      n_missing = ~ sum(is.na(.x)),
+      share_missing = ~ mean(is.na(.x))
+    ),
+    .names = "{.col}__{.fn}"
+  )) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("variable", "stat"),
+    names_sep = "__",
+    values_to = "value"
+  ) %>%
+  mutate(
+    value = ifelse(stat == "share_missing", round(100 * value, 2), value)
+  ) %>%
+  pivot_wider(names_from = stat, values_from = value) %>%
+  arrange(desc(n_missing))
+
+print(na_balance_overall)
 
 
+# =========================================================
+# BALANCE TABLE: p-value of difference between Q1 and Q4
+# Raw and After FE (Birth year + province)
+# =========================================================
+
+library(dplyr)
+library(fixest)
+library(kableExtra)
+library(tibble)
+
+# 1) Build the sample ONCE and consistently
+survey <- readr::read_csv("survey_with_childhood_weather_harmonized.csv")
+
+model_data <- survey %>%
+  filter(
+    BORN_SPAIN == 1,
+    !is.na(childhood_total_dry_days),
+    childhood_total_dry_days != 0
+  ) %>%
+  mutate(
+    treat_std = (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
+      sd(childhood_total_dry_days, na.rm = TRUE),
+    treat_q = ntile(treat_std, 4),
+    q4 = if_else(treat_q == 4, 1, 0),
+    q1 = if_else(treat_q == 1, 1, 0)
+  ) %>%
+  filter(treat_q %in% c(1, 4))
+
+# 2) Covariates to test
+balance_vars <- c(
+  "FEMALE","age","EDUCATION","INCOME",
+  "FATHER_BORN_SPAIN","MOTHER_BORN_SPAIN",
+  "FATHER_EMPLOYMENT","MOTHER_EMPLOYMENT",
+  "FATHER_SCHOOL","MOTHER_SCHOOL",
+  "FATHER_CATHOLIC","MOTHER_CATHOLIC",
+  "survey_year","pop_birth_last_census","SAME_LOC_BIRTH"
+)
+balance_vars <- balance_vars[balance_vars %in% names(model_data)]
+
+# 3) Pretty labels
+pretty_labels <- c(
+  FEMALE = "Female",
+  age = "Age",
+  EDUCATION = "Education",
+  INCOME = "Income",
+  FATHER_BORN_SPAIN = "Father born in Spain",
+  MOTHER_BORN_SPAIN = "Mother born in Spain",
+  FATHER_EMPLOYMENT = "Father employed",
+  MOTHER_EMPLOYMENT = "Mother employed",
+  FATHER_SCHOOL = "Father attended school",
+  MOTHER_SCHOOL = "Mother attended school",
+  FATHER_CATHOLIC = "Father Catholic",
+  MOTHER_CATHOLIC = "Mother Catholic",
+  survey_year = "Survey year",
+  pop_birth_last_census = "Province population at birth",
+  SAME_LOC_BIRTH = "Same province at birth"
+)
+
+# 4) Helper function: extract Q4 vs Q1 p-value
+get_q4_pvals <- function(v, data) {
+  
+  # keep non-missing sample for this variable
+  d <- data %>%
+    select(all_of(c(v, "q4", "BIRTH", "prov_nac"))) %>%
+    filter(!is.na(.data[[v]]), !is.na(q4), !is.na(BIRTH), !is.na(prov_nac))
+  
+  # Raw difference: mean(Q4) - mean(Q1)
+  m_raw <- feols(as.formula(paste0(v, " ~ q4")), data = d)
+  p_raw <- coeftable(m_raw)["q4", "Pr(>|t|)"]
+  diff_raw <- coef(m_raw)["q4"]
+  
+  # FE-residualized variable
+  m_fe_resid <- feols(as.formula(paste0(v, " ~ 1 | BIRTH + prov_nac")), data = d)
+  d$vresid <- resid(m_fe_resid)
+  
+  # Difference after FE
+  m_fe <- feols(vresid ~ q4, data = d)
+  p_fe <- coeftable(m_fe)["q4", "Pr(>|t|)"]
+  diff_fe <- coef(m_fe)["q4"]
+  
+  tibble(
+    variable = v,
+    mean_q1 = mean(d[[v]][d$q4 == 0], na.rm = TRUE),
+    mean_q4 = mean(d[[v]][d$q4 == 1], na.rm = TRUE),
+    diff_raw = unname(diff_raw),
+    p_raw = unname(p_raw),
+    diff_fe = unname(diff_fe),
+    p_fe = unname(p_fe),
+    n_q1 = sum(d$q4 == 0),
+    n_q4 = sum(d$q4 == 1)
+  )
+}
+
+# 5) Run for all covariates
+balance_pval_table <- lapply(balance_vars, get_q4_pvals, data = model_data) %>%
+  bind_rows() %>%
+  mutate(
+    Variable = recode(variable, !!!pretty_labels),
+    across(c(mean_q1, mean_q4, diff_raw, diff_fe), ~ round(.x, 3)),
+    across(c(p_raw, p_fe), ~ round(.x, 3))
+  ) %>%
+  select(
+    Variable,
+    mean_q1,
+    mean_q4,
+    diff_raw,
+    p_raw,
+    diff_fe,
+    p_fe,
+    n_q1,
+    n_q4
+  )
+
+balance_pval_table
+
+# 6) Export to LaTeX
+balance_pval_latex <- kbl(
+  balance_pval_table,
+  format = "latex",
+  booktabs = TRUE,
+  align = "lrrrrrrcc",
+  caption = paste(
+    "Balance of observables between the first and fourth quartiles of childhood dry days.",
+    "Columns Mean Q1 and Mean Q4 report raw means in the lowest and highest treatment quartiles.",
+    "Raw difference reports the unconditional difference in means (Q4 - Q1).",
+    "After FE difference reports the difference after residualizing each covariate on birth-year and province fixed effects.",
+    "P-values correspond to tests of equality between Q1 and Q4."
+  ),
+  col.names = c(
+    "Variable", "Mean Q1", "Mean Q4",
+    "Raw diff.", "p-value",
+    "After FE diff.", "p-value",
+    "N Q1", "N Q4"
+  )
+) %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"))
+
+balance_pval_latex
+
+# =========================================================
+# PROVINCE-LEVEL SCATTER:
+# Catholic share vs Conservative vote share
+# Styled to match the presentation aesthetic
+# =========================================================
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(stringr)
+
+# Load final harmonized data
+survey <- readr::read_csv("survey_with_childhood_weather_harmonized.csv")
+
+# Build model sample for this descriptive province-level graph
+plot_data <- survey %>%
+  filter(BORN_SPAIN == 1) %>%
+  mutate(prov_nac = sprintf("%02d", as.integer(prov_nac))) %>%
+  filter(!is.na(CATHOLIC), !is.na(CONSERVATIVE_VOTE)) %>%
+  filter(!prov_nac %in% c("51", "52"))   # drop Ceuta and Melilla if desired
+
+# Province labels from your canonical province map
+prov_labels <- prov_code_map %>%
+  mutate(prov_nac = sprintf("%02d", as.integer(prov_nac))) %>%
+  distinct(prov_nac, provincia_official)
+
+# Province-level means
+prov_summary <- plot_data %>%
+  group_by(prov_nac) %>%
+  summarise(
+    catholic_share     = mean(CATHOLIC, na.rm = TRUE),
+    conservative_share = mean(CONSERVATIVE_VOTE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(prov_labels, by = "prov_nac") %>%
+  mutate(
+    provincia_official = case_when(
+      provincia_official == "Araba/Álava"        ~ "Araba/Álava",
+      provincia_official == "Valencia/València"  ~ "Valencia/València",
+      provincia_official == "Alicante/Alacant"   ~ "Alicante/Alacant",
+      provincia_official == "Castellón/Castelló" ~ "Castellón/Castelló",
+      TRUE ~ provincia_official
+    )
+  )
+
+# Optional: inspect
+print(prov_summary)
+
+# ---------------------------------------------------------
+# Presentation-style theme
+# ---------------------------------------------------------
+theme_presentation_scatter <- function(base_size = 16) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      plot.background   = element_rect(fill = "#F2F2F2", color = NA),
+      panel.background  = element_rect(fill = "#F2F2F2", color = NA),
+      panel.grid.major  = element_line(color = "#D9D9D9", linewidth = 0.45),
+      panel.grid.minor  = element_blank(),
+      axis.title        = element_text(face = "bold", color = "black"),
+      axis.text         = element_text(color = "black"),
+      plot.title        = element_text(face = "bold", color = "#B22222", size = base_size + 4),
+      plot.subtitle     = element_text(color = "black", size = base_size),
+      plot.caption      = element_text(color = "black", size = base_size - 2),
+      legend.position   = "none"
+    )
+}
+
+p_prov_corr <- ggplot(
+  prov_summary,
+  aes(x = catholic_share, y = conservative_share)
+) +
+  geom_point(
+    size = 3,
+    color = "#3E7CB1",
+    alpha = 0.95
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = TRUE,
+    color = "#B22222",
+    fill = "grey80",
+    linewidth = 1.1
+  ) +
+  ggrepel::geom_text_repel(
+    aes(label = provincia_official),
+    size = 3.2,
+    fontface = "bold",
+    color = "black",
+    box.padding = 0.25,
+    point.padding = 0.18,
+    segment.color = NA,
+    max.overlaps = Inf,
+    seed = 1234
+  ) +
+  labs(
+    x = "Share Identifying as Catholic",
+    y = "Share Voting Conservative last election"
+  ) +
+  theme_minimal(base_size = 16) +
+  theme(
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(color = "black"),
+    panel.grid.minor = element_blank()
+  )
+
+
+# Show plot
+print(p_prov_corr)
+
+# ---------------------------------------------------------
+# Save in high quality
+# ---------------------------------------------------------
+ggsave(
+  "province_catholic_conservative_scatter.png",
+  p_prov_corr,
+  width = 12,
+  height = 7,
+  dpi = 600
+)
+ggsave(
+  "province_catholic_conservative_scatter.pdf",
+  p_prov_corr,
+  width = 12,
+  height = 7,
+  device = cairo_pdf
+)
 # Main regressions -------------------------------------------
 
 library(readr)
@@ -2026,360 +2293,422 @@ library(modelsummary)
 library(tidyr)
 library(ggplot2)
 
-
 # Load the data
 survey <- read_csv("survey_with_childhood_weather_harmonized.csv")
 
-model_data %>% count(BIRTH, name = "n") %>% arrange(BIRTH)
-
-
 # Prepare model data
 model_data <- survey %>%
-  filter(BORN_SPAIN == 1,
-         !is.na(childhood_total_dry_days),
-         childhood_total_dry_days != 0) %>%
+  filter(
+    BORN_SPAIN == 1,
+    !is.na(childhood_total_dry_days),
+    childhood_total_dry_days != 0
+  ) %>%
   mutate(
     year = BIRTH,
     birth_prov_cluster = interaction(BIRTH, prov_nac)
   ) %>%
-  dplyr::select(CATHOLIC, childhood_total_dry_days, survey_year, FEMALE, age, BIRTH, prov_nac,
-                FATHER_BORN_SPAIN, FATHER_SCHOOL, FATHER_EDUCATION,
-                FATHER_EMPLOYMENT, FATHER_EMPLOYMENT_TYPE, FATHER_CATHOLIC,
-                MOTHER_BORN_SPAIN, MOTHER_SCHOOL, MOTHER_EDUCATION,
-                MOTHER_EMPLOYMENT, MOTHER_CATHOLIC, birth_prov_cluster, COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE, PUBLIC_SECTOR_EMP, MERITOCRACY_BELIEF, SUBJECTIVE_CLASS, FAR_RIGHT_VOTE, CONSERVATIVE_VOTE, TRUST_PEOPLE, INCOME, EDUCATION, RELIGIOUS_PRACTICE, PARTICIPATION, SIZE_TOWN, dry_days_5_9, dry_days_10_14, dry_days_15_18, PP_VOTE, pop_birth_last_census)
+  dplyr::select(
+    CATHOLIC, childhood_total_dry_days, survey_year, FEMALE, age, BIRTH, prov_nac,
+    FATHER_BORN_SPAIN, FATHER_SCHOOL, FATHER_EDUCATION,
+    FATHER_EMPLOYMENT, FATHER_EMPLOYMENT_TYPE, FATHER_CATHOLIC,
+    MOTHER_BORN_SPAIN, MOTHER_SCHOOL, MOTHER_EDUCATION,
+    MOTHER_EMPLOYMENT, MOTHER_CATHOLIC, birth_prov_cluster,
+    COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE, PUBLIC_SECTOR_EMP,
+    MERITOCRACY_BELIEF, SUBJECTIVE_CLASS, FAR_RIGHT_VOTE, CONSERVATIVE_VOTE,
+    TRUST_PEOPLE, INCOME, EDUCATION, RELIGIOUS_PRACTICE, PARTICIPATION,
+    SIZE_TOWN, dry_days_5_9, dry_days_10_14, dry_days_15_18, PP_VOTE,
+    pop_birth_last_census
+  )
 
 model_data %>% count(BIRTH, name = "n") %>% arrange(BIRTH)
 
-model_data %>% summarise(across(everything(), ~ sum(is.na(.)))) %>% pivot_longer(everything(), names_to = "variable", values_to = "n_na") %>% arrange(desc(n_na), variable) %>% print(n = Inf, width = Inf)
+model_data %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "n_na") %>%
+  arrange(desc(n_na), variable) %>%
+  print(n = Inf, width = Inf)
 
+# Log population at birth
 model_data <- model_data %>%
   mutate(
     log_pop_birth = log(pop_birth_last_census)
   )
 
-# Standardize Treatment Variable
-
-
+# Standardize treatment
 model_data <- model_data %>%
   mutate(
-    childhood_total_dry_days_std = (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) / sd(childhood_total_dry_days, na.rm = TRUE)
+    childhood_total_dry_days_std = (
+      childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)
+    ) / sd(childhood_total_dry_days, na.rm = TRUE),
+    childhood_total_dry_days_std_sq = childhood_total_dry_days_std^2
   )
 
+# Helper: mean DV on the estimation sample
 
-# Linear Probability Models: CATHOLIC 
+dv_mean_from_data <- function(data, fml, fe_vars = c("BIRTH", "prov_nac")) {
+  yname <- all.vars(fml[[2]])[1]
+  fml_chr <- paste(deparse(fml, width.cutoff = 500), collapse = " ")
+  main_part <- trimws(strsplit(fml_chr, "\\|")[[1]][1])
+  rhs_vars <- all.vars(as.formula(main_part))
+  needed <- unique(c(rhs_vars, fe_vars))
+  d_est <- data[stats::complete.cases(data[, needed, drop = FALSE]), , drop = FALSE]
+  mean(d_est[[yname]], na.rm = TRUE)
+}
 
 
-# 1. With FE, No controls
-lpm_fe_nocontrols_cat <- feols(
-  CATHOLIC ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2)| BIRTH + prov_nac,
+# RELIGIOUS OUTCOMES
+
+# CATHOLIC
+lpm_fe_linear_cat <- feols(
+  CATHOLIC ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-# 2. With FE, With controls
-lpm_fe_controls_cat <- feols(
-  CATHOLIC ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2) + 
-    FATHER_BORN_SPAIN +  survey_year +
-     MOTHER_BORN_SPAIN +  FATHER_EMPLOYMENT +
-    MOTHER_EMPLOYMENT + log_pop_birth | BIRTH + prov_nac,
+lpm_fe_quadratic_cat <- feols(
+  CATHOLIC ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-
-# Linear Probability Models: RELIGIOUS PRACTICE 
-
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_rel <- feols(
-  RELIGIOUS_PRACTICE ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2)  | BIRTH + prov_nac,
+# RELIGIOUS PRACTICE
+lpm_fe_linear_rel <- feols(
+  RELIGIOUS_PRACTICE ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-# 2. With FE, With controls
-lpm_fe_controls_rel <- feols(
-  RELIGIOUS_PRACTICE ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2)  + 
-    FATHER_BORN_SPAIN + survey_year +
-    FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN +  
-    MOTHER_EMPLOYMENT + log_pop_birth  | BIRTH + prov_nac,
+lpm_fe_quadratic_rel <- feols(
+  RELIGIOUS_PRACTICE ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-
-# Linear Probability Models: COUPLE_CATHOLIC
-
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_cou <- feols(
-  COUPLE_CATHOLIC ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2)  | BIRTH + prov_nac,
+# COUPLE_CATHOLIC
+lpm_fe_linear_cou <- feols(
+  COUPLE_CATHOLIC ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-# 2. With FE, With controls
-lpm_fe_controls_cou <- feols(
-  COUPLE_CATHOLIC ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2)  + 
-    FATHER_BORN_SPAIN  + survey_year +
-    FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN  + 
-    MOTHER_EMPLOYMENT + log_pop_birth  | BIRTH + prov_nac,
+lpm_fe_quadratic_cou <- feols(
+  COUPLE_CATHOLIC ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
+# Exact formulas for mean DV rows
+fml_cat_lin <- CATHOLIC ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_cat_quad <- CATHOLIC ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
 
-# Model summary: Linear (Standardized), single Controls indicator
+fml_rel_lin <- RELIGIOUS_PRACTICE ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_rel_quad <- RELIGIOUS_PRACTICE ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
 
+fml_cou_lin <- COUPLE_CATHOLIC ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_cou_quad <- COUPLE_CATHOLIC ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+
+mean_cat_lin  <- dv_mean_from_data(model_data, fml_cat_lin)
+mean_cat_quad <- dv_mean_from_data(model_data, fml_cat_quad)
+
+mean_rel_lin  <- dv_mean_from_data(model_data, fml_rel_lin)
+mean_rel_quad <- dv_mean_from_data(model_data, fml_rel_quad)
+
+mean_cou_lin  <- dv_mean_from_data(model_data, fml_cou_lin)
+mean_cou_quad <- dv_mean_from_data(model_data, fml_cou_quad)
+
+add_rows_religion <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Catholic: Linear"               = c(sprintf("%.3f", mean_cat_lin),  "Linear"),
+  "Catholic: Quadratic"            = c(sprintf("%.3f", mean_cat_quad), "Quadratic"),
+  "Religious practice: Linear"     = c(sprintf("%.3f", mean_rel_lin),  "Linear"),
+  "Religious practice: Quadratic"  = c(sprintf("%.3f", mean_rel_quad), "Quadratic"),
+  "Couple catholic: Linear"        = c(sprintf("%.3f", mean_cou_lin),  "Linear"),
+  "Couple catholic: Quadratic"     = c(sprintf("%.3f", mean_cou_quad), "Quadratic")
+)
+
+models_religion <- list(
+  "Catholic: Linear"              = lpm_fe_linear_cat,
+  "Catholic: Quadratic"           = lpm_fe_quadratic_cat,
+  "Religious practice: Linear"    = lpm_fe_linear_rel,
+  "Religious practice: Quadratic" = lpm_fe_quadratic_rel,
+  "Couple catholic: Linear"       = lpm_fe_linear_cou,
+  "Couple catholic: Quadratic"    = lpm_fe_quadratic_cou
+)
 
 modelsummary(
-  list(
-    "Catholic"                        = lpm_fe_nocontrols_cat,
-    "Catholic + Controls"             = lpm_fe_controls_cat,
-    "Religious practice"              = lpm_fe_nocontrols_rel,
-    "Religious practice + Controls"   = lpm_fe_controls_rel,
-    "Couple catholic"              = lpm_fe_nocontrols_cou,
-    "Couple catholic + Controls"   = lpm_fe_controls_cou
-  ),
-  title = "LPM Catholic identification and OLS Religious attendance",
-  output = "latex",
-  stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",   # survey_year always included
-  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Catholic` = "No",
-    `Catholic + Controls` = "Yes",
-    `Religious practice` = "No",
-    `Religious practice + Controls` = "Yes",
-    `Couple Catholic` = "No",
-    `Couple Catholic + Controls` = "Yes"
-  )
-)
-
-
-# Linear Probability Models: PARTICIPATION
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_par <- feols(
-  PARTICIPATION ~ childhood_total_dry_days_std + survey_year  + I(childhood_total_dry_days_std^2)    | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-# 2. With FE, With controls
-lpm_fe_controls_par <- feols(
-  PARTICIPATION ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2)  + 
-    FATHER_BORN_SPAIN +  
-    FATHER_EMPLOYMENT +
-    MOTHER_BORN_SPAIN +  MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-# Linear Probability Models: CONSERVATIVE_VOTE
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_con <- feols(
-  CONSERVATIVE_VOTE ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2)   | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-# 2. With FE, With controls
-lpm_fe_controls_con <- feols(
-  CONSERVATIVE_VOTE ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2) + 
-    FATHER_BORN_SPAIN + 
-    FATHER_EMPLOYMENT +
-    MOTHER_BORN_SPAIN +  MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-# Linear Probability Models: LEFT_RIGHT
-
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_far <- feols(
-  LEFT_RIGHT ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2) | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-# 2. With FE, With controls
-lpm_fe_controls_far <- feols(
-  LEFT_RIGHT ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2) +
-    FATHER_BORN_SPAIN +  
-    FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN +  
-    MOTHER_EMPLOYMENT + survey_year  + log_pop_birth | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-
-
-# Model summary: Linear (Standardized), single Controls indicator
-
-
-modelsummary(
-  list(
-    "Participation"                   = lpm_fe_nocontrols_par,
-    "Participation + Controls"        = lpm_fe_controls_par,
-    "Conservative"                    = lpm_fe_nocontrols_con,
-    "Conservative + Controls"         = lpm_fe_controls_con,
-    "Left or Right"                       = lpm_fe_nocontrols_far,
-    "Left or Right"            = lpm_fe_controls_far
-  ),
-  title = "LPM: Participation in last election, probability voting conservative and ideological positioning",
+  models_religion,
+  title = "Religious outcomes: linear and quadratic treatment specifications",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  coef_rename = c(
+    "childhood_total_dry_days_std"    = "Dry days (std.)",
+    "childhood_total_dry_days_std_sq" = "Dry days squared"
+  ),
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Participation` = "No",
-    `Participation + Controls` = "Yes",
-    `Conservative` = "No",
-    `Conservative + Controls` = "Yes",
-    `Left or Right` = "No",
-    `Left or Right + Controls` = "Yes"
-  )
+  add_rows = add_rows_religion
 )
 
-# Falsification analysis - Income, Education and Trust people ---------------------------
 
+# POLITICAL OUTCOMES
 
-# Load the data
-survey <- read_csv("survey_with_childhood_weather_harmonized.csv")
-
-
-# Prepare model data
-model_data <- survey %>%
-  filter(BORN_SPAIN == 1,
-         !is.na(childhood_total_dry_days),
-         childhood_total_dry_days != 0) %>%
-  mutate(
-    year = BIRTH,
-    birth_prov_cluster = interaction(BIRTH, prov_nac)
-  ) %>%
-  dplyr::select(CATHOLIC, childhood_total_dry_days, survey_year, FEMALE, age, BIRTH, prov_nac,
-                FATHER_BORN_SPAIN, FATHER_SCHOOL, FATHER_EDUCATION,
-                FATHER_EMPLOYMENT, FATHER_EMPLOYMENT_TYPE, FATHER_CATHOLIC,
-                MOTHER_BORN_SPAIN, MOTHER_SCHOOL, MOTHER_EDUCATION,
-                MOTHER_EMPLOYMENT, MOTHER_CATHOLIC, birth_prov_cluster, COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE, PUBLIC_SECTOR_EMP, MERITOCRACY_BELIEF, SUBJECTIVE_CLASS, FAR_RIGHT_VOTE, CONSERVATIVE_VOTE, TRUST_PEOPLE, RELIGIOUS_PRACTICE, PARTICIPATION, INCOME, EDUCATION, pop_birth_last_census)
-
-
-# Standardize Treatment Variable
-
-model_data <- model_data %>%
-  mutate(
-    childhood_total_dry_days_std = (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) / sd(childhood_total_dry_days, na.rm = TRUE)
-  )
-
-model_data <- model_data %>%
-  mutate(
-    log_pop_birth = log(pop_birth_last_census)
-  )
-
-
-# Linear Probability Models: EDUCATION
-
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_cat <- feols(
-  EDUCATION ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2) | BIRTH + prov_nac,
+# PARTICIPATION
+lpm_fe_linear_par <- feols(
+  PARTICIPATION ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-# 2. With FE, With controls
-lpm_fe_controls_cat <- feols(
-  EDUCATION ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2)  + 
-    FATHER_BORN_SPAIN +  survey_year +
-    FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN +  
-    MOTHER_EMPLOYMENT + log_pop_birth | BIRTH + prov_nac,
+lpm_fe_quadratic_par <- feols(
+  PARTICIPATION ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-
-# Linear Probability Models: INCOME
-
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_rel <- feols(
-  INCOME ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2)  | BIRTH + prov_nac,
+# CONSERVATIVE_VOTE
+lpm_fe_linear_con <- feols(
+  CONSERVATIVE_VOTE ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-# 2. With FE, With controls
-lpm_fe_controls_rel <- feols(
-  INCOME ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2) + 
-    FATHER_BORN_SPAIN  + survey_year +
-    FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN +  
-    MOTHER_EMPLOYMENT + log_pop_birth | BIRTH + prov_nac,
+lpm_fe_quadratic_con <- feols(
+  CONSERVATIVE_VOTE ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-
-
-# Linear Probability Models: TRUST_PEOPLE
-
-
-# 1. With FE, No controls
-lpm_fe_nocontrols_cou_trust <- feols(
-  TRUST_PEOPLE ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2)  | BIRTH + prov_nac,
+# LEFT_RIGHT
+lpm_fe_linear_lr <- feols(
+  LEFT_RIGHT ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
-# 2. With FE, With controls
-lpm_fe_controls_cou_trust <- feols(
-  TRUST_PEOPLE ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2)  + 
-    FATHER_BORN_SPAIN  + survey_year +
-    FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN  + 
-    MOTHER_EMPLOYMENT + log_pop_birth | BIRTH + prov_nac,
+lpm_fe_quadratic_lr <- feols(
+  LEFT_RIGHT ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~prov_nac
 )
 
+fml_par_lin <- PARTICIPATION ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_par_quad <- PARTICIPATION ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
 
+fml_con_lin <- CONSERVATIVE_VOTE ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_con_quad <- CONSERVATIVE_VOTE ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
 
-# Model summary: Linear (Standardized), single Controls indicator
+fml_lr_lin <- LEFT_RIGHT ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_lr_quad <- LEFT_RIGHT ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
 
+mean_par_lin  <- dv_mean_from_data(model_data, fml_par_lin)
+mean_par_quad <- dv_mean_from_data(model_data, fml_par_quad)
+
+mean_con_lin  <- dv_mean_from_data(model_data, fml_con_lin)
+mean_con_quad <- dv_mean_from_data(model_data, fml_con_quad)
+
+mean_lr_lin   <- dv_mean_from_data(model_data, fml_lr_lin)
+mean_lr_quad  <- dv_mean_from_data(model_data, fml_lr_quad)
+
+models_politics <- list(
+  "Participation: Linear"    = lpm_fe_linear_par,
+  "Participation: Quadratic" = lpm_fe_quadratic_par,
+  "Conservative: Linear"     = lpm_fe_linear_con,
+  "Conservative: Quadratic"  = lpm_fe_quadratic_con,
+  "Left-right: Linear"       = lpm_fe_linear_lr,
+  "Left-right: Quadratic"    = lpm_fe_quadratic_lr
+)
+
+add_rows_politics <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Participation: Linear"    = c(sprintf("%.3f", mean_par_lin),  "Linear"),
+  "Participation: Quadratic" = c(sprintf("%.3f", mean_par_quad), "Quadratic"),
+  "Conservative: Linear"     = c(sprintf("%.3f", mean_con_lin),  "Linear"),
+  "Conservative: Quadratic"  = c(sprintf("%.3f", mean_con_quad), "Quadratic"),
+  "Left-right: Linear"       = c(sprintf("%.3f", mean_lr_lin),   "Linear"),
+  "Left-right: Quadratic"    = c(sprintf("%.3f", mean_lr_quad),  "Quadratic")
+)
 
 modelsummary(
-  list(
-    "Education"                        = lpm_fe_nocontrols_cat,
-    "Education"             = lpm_fe_controls_cat,
-    "Household Income"              = lpm_fe_nocontrols_rel,
-    "Household Income"   = lpm_fe_controls_rel,
-    "Trust People"                 = lpm_fe_nocontrols_cou_trust,
-    "Trust People"      = lpm_fe_controls_cou_trust
-  ),
-  title = "OLS education level, OLS Household income and OLS ideology",
+  models_politics,
+  title = "Political outcomes: linear and quadratic treatment specifications",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",   # survey_year always included
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  coef_rename = c(
+    "childhood_total_dry_days_std"    = "Dry days (std.)",
+    "childhood_total_dry_days_std_sq" = "Dry days squared"
+  ),
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Catholic` = "No",
-    `Catholic + Controls` = "Yes",
-    `Religious practice` = "No",
-    `Religious practice + Controls` = "Yes",
-    `Couple Catholic` = "No",
-    `Couple Catholic + Controls` = "Yes"
-  )
+  add_rows = add_rows_politics
 )
 
 
+# OTHER OUTCOMES / FALSIFICATION
 
+# EDUCATION
+lpm_fe_linear_edu <- feols(
+  EDUCATION ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~prov_nac
+)
 
+lpm_fe_quadratic_edu <- feols(
+  EDUCATION ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~prov_nac
+)
+
+# INCOME
+lpm_fe_linear_inc <- feols(
+  INCOME ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~prov_nac
+)
+
+lpm_fe_quadratic_inc <- feols(
+  INCOME ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~prov_nac
+)
+
+# TRUST_PEOPLE
+lpm_fe_linear_trust <- feols(
+  TRUST_PEOPLE ~ childhood_total_dry_days_std + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~prov_nac
+)
+
+lpm_fe_quadratic_trust <- feols(
+  TRUST_PEOPLE ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE +
+    FATHER_BORN_SPAIN + FATHER_EMPLOYMENT +
+    MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~prov_nac
+)
+
+fml_edu_lin <- EDUCATION ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_edu_quad <- EDUCATION ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_inc_lin <- INCOME ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_inc_quad <- INCOME ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_tru_lin <- TRUST_PEOPLE ~ childhood_total_dry_days_std + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+fml_tru_quad <- TRUST_PEOPLE ~ childhood_total_dry_days_std + childhood_total_dry_days_std_sq + FEMALE + FATHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_BORN_SPAIN + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | BIRTH + prov_nac
+
+mean_edu_lin   <- dv_mean_from_data(model_data, fml_edu_lin)
+mean_edu_quad  <- dv_mean_from_data(model_data, fml_edu_quad)
+
+mean_inc_lin   <- dv_mean_from_data(model_data, fml_inc_lin)
+mean_inc_quad  <- dv_mean_from_data(model_data, fml_inc_quad)
+
+mean_tru_lin   <- dv_mean_from_data(model_data, fml_tru_lin)
+mean_tru_quad  <- dv_mean_from_data(model_data, fml_tru_quad)
+
+models_other <- list(
+  "Education: Linear"            = lpm_fe_linear_edu,
+  "Education: Quadratic"         = lpm_fe_quadratic_edu,
+  "Household income: Linear"     = lpm_fe_linear_inc,
+  "Household income: Quadratic"  = lpm_fe_quadratic_inc,
+  "Trust people: Linear"         = lpm_fe_linear_trust,
+  "Trust people: Quadratic"      = lpm_fe_quadratic_trust
+)
+
+add_rows_other <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Education: Linear"           = c(sprintf("%.3f", mean_edu_lin),  "Linear"),
+  "Education: Quadratic"        = c(sprintf("%.3f", mean_edu_quad), "Quadratic"),
+  "Household income: Linear"    = c(sprintf("%.3f", mean_inc_lin),  "Linear"),
+  "Household income: Quadratic" = c(sprintf("%.3f", mean_inc_quad), "Quadratic"),
+  "Trust people: Linear"        = c(sprintf("%.3f", mean_tru_lin),  "Linear"),
+  "Trust people: Quadratic"     = c(sprintf("%.3f", mean_tru_quad), "Quadratic")
+)
+
+modelsummary(
+  models_other,
+  title = "Other outcomes: linear and quadratic treatment specifications",
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  coef_rename = c(
+    "childhood_total_dry_days_std"    = "Dry days (std.)",
+    "childhood_total_dry_days_std_sq" = "Dry days squared"
+  ),
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
+  add_rows = add_rows_other
+)
 
 # Spline section ----------------------------------------------------------
 
@@ -2400,7 +2729,7 @@ knots_treat <- quantile(
 lpm_fe_spline_cat <- feols(
   CATHOLIC ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data,
   cluster = ~prov_nac
@@ -2409,7 +2738,7 @@ lpm_fe_spline_cat <- feols(
 lpm_fe_spline_rel <- feols(
   RELIGIOUS_PRACTICE ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data,
   cluster = ~prov_nac
@@ -2418,7 +2747,7 @@ lpm_fe_spline_rel <- feols(
 lpm_fe_spline_cou <- feols(
   COUPLE_CATHOLIC ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data,
   cluster = ~prov_nac
@@ -2429,7 +2758,7 @@ lpm_fe_spline_cou <- feols(
 lpm_fe_spline_par <- feols(
   PARTICIPATION ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data,
   cluster = ~prov_nac
@@ -2438,7 +2767,7 @@ lpm_fe_spline_par <- feols(
 lpm_fe_spline_con <- feols(
   CONSERVATIVE_VOTE ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data,
   cluster = ~prov_nac
@@ -2447,7 +2776,7 @@ lpm_fe_spline_con <- feols(
 lpm_fe_spline_lr <- feols(
   LEFT_RIGHT ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data,
   cluster = ~prov_nac
@@ -2476,8 +2805,8 @@ boundary_knots <- range(model_data$childhood_total_dry_days_std, na.rm = TRUE)
 lm_spline_cat <- lm(
   CATHOLIC ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year +
-    factor(BIRTH) + factor(prov_nac),
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + 
+    factor(BIRTH) + factor(prov_nac) + log_pop_birth,
   data = model_data
 )
 
@@ -2485,7 +2814,7 @@ lm_spline_rel <- lm(
   RELIGIOUS_PRACTICE ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year +
-    factor(BIRTH) + factor(prov_nac),
+    factor(BIRTH) + factor(prov_nac) + log_pop_birth,
   data = model_data
 )
 
@@ -2493,7 +2822,7 @@ lm_spline_cou <- lm(
   COUPLE_CATHOLIC ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year +
-    factor(BIRTH) + factor(prov_nac),
+    factor(BIRTH) + factor(prov_nac) + log_pop_birth,
   data = model_data
 )
 
@@ -2501,7 +2830,7 @@ lm_spline_par <- lm(
   PARTICIPATION ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year +
-    factor(BIRTH) + factor(prov_nac),
+    factor(BIRTH) + factor(prov_nac) + log_pop_birth,
   data = model_data
 )
 
@@ -2509,7 +2838,7 @@ lm_spline_con <- lm(
   CONSERVATIVE_VOTE ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year +
-    factor(BIRTH) + factor(prov_nac),
+    factor(BIRTH) + factor(prov_nac) + log_pop_birth,
   data = model_data
 )
 
@@ -2517,7 +2846,7 @@ lm_spline_lr <- lm(
   LEFT_RIGHT ~ ns(childhood_total_dry_days_std, knots = knots_treat) +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year +
-    factor(BIRTH) + factor(prov_nac),
+    factor(BIRTH) + factor(prov_nac) + log_pop_birth,
   data = model_data
 )
 
@@ -2627,7 +2956,7 @@ library(scales)
 
 # 0) USER INPUTS (change here only)
 
-y_var <- "LEFT_RIGHT"                     # outcome
+y_var <- "CONSERVATIVE_VOTE"                     # outcome
 d_var <- "childhood_total_dry_days_std" # treatment
 
 controls_rhs <- c(
@@ -2711,11 +3040,9 @@ grid <- data.frame(
 grid$yhat <- as.numeric(predict(kr, exdat = grid$d_res))
 
 
-# ------------------------------------------------------------
-# 5) Binned means (40 quantile bins — cosmetic change)
-# ------------------------------------------------------------
+# 5) Binned means (50 quantile bins — cosmetic change)
 
-n_bins <- 50   # 🔴 reduced from 50 to 40
+n_bins <- 50   
 
 df_bins <- df %>%
   mutate(bin = ntile(d_res, n_bins)) %>%
@@ -2727,9 +3054,8 @@ df_bins <- df %>%
     .groups = "drop"
   )
 
-# ------------------------------------------------------------
+
 # 6) Plot (cosmetic improvements only)
-# ------------------------------------------------------------
 
 ggplot() +
   # binned means
@@ -2912,84 +3238,258 @@ p_tertiles <- ggplot(model_data, aes(x = .data[[x_var]])) +
 
 p_tertiles
 
+p_quartiles <- p_quartiles +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 13),
+    legend.position = "right"
+  )
 
-# Non-parametric identification: quartile dummies of treatment -----------------------------------------------------------------------
+p_tertiles <- p_tertiles +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 13),
+    legend.position = "right"
+  )
+
+
+# Export these 2 plots for LaTeX in highest quality
 
 library(ggplot2)
+library(ragg)
+
+# Create output folder
+if (!dir.exists("figures")) dir.create("figures")
+
+# Helper: save plot as vector PDF for LaTeX
+save_latex_plot <- function(plot_obj, filename,
+                            width = 10, height = 5.625,
+                            save_png_fallback = FALSE,
+                            png_dpi = 600) {
+  
+  ggsave(
+    filename = file.path("figures", paste0(filename, ".pdf")),
+    plot = plot_obj,
+    device = cairo_pdf,
+    width = width,
+    height = height,
+    units = "in",
+    bg = "white"
+  )
+  
+  if (save_png_fallback) {
+    ggsave(
+      filename = file.path("figures", paste0(filename, ".png")),
+      plot = plot_obj,
+      device = ragg::agg_png,
+      width = width,
+      height = height,
+      units = "in",
+      dpi = png_dpi,
+      bg = "white"
+    )
+  }
+}
+
+# Save both plots
+save_latex_plot(p_quartiles, "distribution_quartiles")
+save_latex_plot(p_tertiles,  "distribution_tertiles")
+
+
+# Non-parametric identification: quartile and tertile bins of treatment -------------------
+
+library(dplyr)
+library(fixest)
+library(modelsummary)
+library(broom)
+library(purrr)
+library(ggplot2)
 library(scales)
+library(tibble)
+library(ragg)
 
 
-# ADRF plot styling helpers
+# 1) Prepare treatment bins once
+
+
+model_data <- model_data %>%
+  mutate(
+    treat_q = ntile(childhood_total_dry_days_std, 4),
+    treat_t = ntile(childhood_total_dry_days_std, 3)
+  )
+
+table(model_data$treat_q, useNA = "ifany")
+table(model_data$treat_t, useNA = "ifany")
+
+
+# 2) Helpers
+
 
 theme_adrf <- function() {
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 17) +
     theme(
       panel.grid.major.x = element_blank(),
       panel.grid.minor.x = element_blank(),
-      panel.grid.major.y = element_line(color = "grey85", linewidth = 0.4),
-      panel.grid.minor.y = element_line(color = "grey92", linewidth = 0.25),
-      strip.text = element_text(face = "bold"),
-      plot.title = element_text(face = "bold"),
+      panel.grid.major.y = element_line(color = "grey85", linewidth = 0.45),
+      panel.grid.minor.y = element_blank(),
+      strip.text = element_text(face = "bold", size = 15),
+      plot.title = element_blank(),
+      plot.subtitle = element_blank(),
+      axis.title = element_text(size = 15),
+      axis.text = element_text(size = 13),
       legend.position = "none"
     )
 }
 
-plot_adrf <- function(df, nbins, xlabels, title,
-                      ylab = "Estimated effect (vs lowest bin)",
+plot_adrf <- function(df, nbins, xlabels,
+                      ylab = "Effect relative to lowest bin",
                       line_color = "#1f77b4") {
   
   ggplot(df, aes(x = treat_level, y = estimate, group = Outcome)) +
-    geom_hline(yintercept = 0, linetype = "dashed", color = "grey45", linewidth = 0.55) +
-    geom_errorbar(aes(ymin = conf.low, ymax = conf.high),
-                  width = 0.10, color = "grey55", linewidth = 0.55) +
-    geom_line(color = line_color, linewidth = 0.95) +
-    geom_point(color = line_color, size = 2.2) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey45", linewidth = 0.65) +
+    geom_errorbar(
+      aes(ymin = conf.low, ymax = conf.high),
+      width = 0.08, color = "grey55", linewidth = 0.65
+    ) +
+    geom_line(color = line_color, linewidth = 1.1) +
+    geom_point(
+      aes(color = treat_level == 1),
+      size = 2.9,
+      show.legend = FALSE
+    ) +
+    scale_color_manual(values = c(`TRUE` = "grey35", `FALSE` = line_color)) +
     facet_wrap(~ Outcome, scales = "free_y") +
     scale_x_continuous(breaks = 1:nbins, labels = xlabels) +
     scale_y_continuous(labels = label_number(accuracy = 0.01)) +
-    labs(title = title, x = NULL, y = ylab) +
+    labs(
+      title = NULL,
+      subtitle = NULL,
+      x = NULL,
+      y = ylab
+    ) +
     theme_adrf()
 }
 
+plot_bin_coefficients <- function(df, xvar,
+                                  ylab = "Coefficient estimate (95% CI)") {
+  ggplot(df, aes(x = .data[[xvar]], y = estimate, ymin = conf.low, ymax = conf.high)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey45", linewidth = 0.65) +
+    geom_pointrange(color = "#1f77b4", linewidth = 0.55) +
+    facet_wrap(~ Outcome, scales = "free_y") +
+    labs(
+      title = NULL,
+      subtitle = NULL,
+      x = NULL,
+      y = ylab
+    ) +
+    theme_adrf()
+}
 
-model_data <- model_data %>%
-  mutate(
-    treat_q = factor(ntile(childhood_total_dry_days_std, 4), levels = 1:4),
-    treat_t = factor(ntile(childhood_total_dry_days_std, 3), levels = 1:3)
+extract_binned_effects <- function(models, var_prefix, label_map) {
+  map_dfr(models, ~ tidy(.x, conf.int = TRUE), .id = "Outcome") %>%
+    filter(grepl(paste0("^", var_prefix, "::"), term)) %>%
+    mutate(
+      bin_label   = recode(term, !!!label_map),
+      treat_level = as.integer(sub(paste0(var_prefix, "::"), "", term))
+    )
+}
+
+build_adrf_data <- function(coef_df, baseline_level = 1L) {
+  out <- coef_df %>%
+    select(Outcome, treat_level, estimate, conf.low, conf.high)
+  
+  bind_rows(
+    out,
+    tibble(
+      Outcome     = unique(out$Outcome),
+      treat_level = baseline_level,
+      estimate    = 0,
+      conf.low    = 0,
+      conf.high   = 0
+    )
+  ) %>%
+    arrange(Outcome, treat_level)
+}
+
+pretty_outcomes <- c(
+  Catholic          = "Catholic",
+  ReligiousPractice = "Religious practice",
+  CoupleCatholic    = "Catholic partner",
+  Participation     = "Participation",
+  Conservative      = "Conservative vote",
+  LeftRight         = "Left-right scale",
+  Income            = "Income",
+  Education         = "Education",
+  TrustPeople       = "Trust in people"
+)
+
+q_labels <- c(
+  "treat_q::2" = "Q2 vs Q1",
+  "treat_q::3" = "Q3 vs Q1",
+  "treat_q::4" = "Q4 vs Q1"
+)
+
+t_labels <- c(
+  "treat_t::2" = "T2 vs T1",
+  "treat_t::3" = "T3 vs T1"
+)
+
+save_latex_plot <- function(plot_obj, filename,
+                            width = 10, height = 5.625,
+                            save_png_fallback = FALSE,
+                            png_dpi = 600) {
+  
+  ggsave(
+    filename = file.path("figures", paste0(filename, ".pdf")),
+    plot = plot_obj,
+    device = cairo_pdf,
+    width = width,
+    height = height,
+    units = "in",
+    bg = "white"
   )
+  
+  if (save_png_fallback) {
+    ggsave(
+      filename = file.path("figures", paste0(filename, ".png")),
+      plot = plot_obj,
+      device = ragg::agg_png,
+      width = width,
+      height = height,
+      units = "in",
+      dpi = png_dpi,
+      bg = "white"
+    )
+  }
+}
 
-# 1) Quartiles of standardized treatment (overall distribution)
-model_data <- model_data %>%
-  mutate(
-    treat_q = ntile(childhood_total_dry_days_std, 4)  # 1 = lowest exposure, 4 = highest
-  )
 
-table(model_data$treat_q, useNA = "ifany")  # quick sanity check
+# 3) Quartiles: Religious outcomes
 
 
-# Religious outcomes: CATHOLIC, RELIGIOUS_PRACTICE, COUPLE_CATHOLIC
-
-# CATHOLIC
 lpm_fe_q_nocontrols_cat <- feols(
   CATHOLIC ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_q_controls_cat <- feols(
   CATHOLIC ~ i(treat_q, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year + log_pop_birth  | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
-# RELIGIOUS PRACTICE
 lpm_fe_q_nocontrols_rel <- feols(
   RELIGIOUS_PRACTICE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_q_controls_rel <- feols(
@@ -2997,15 +3497,14 @@ lpm_fe_q_controls_rel <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
-# COUPLE CATHOLIC
 lpm_fe_q_nocontrols_cou <- feols(
   COUPLE_CATHOLIC ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_q_controls_cou <- feols(
@@ -3013,14 +3512,9 @@ lpm_fe_q_controls_cou <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
-
-
-# Joint tests (religious outcomes)
-# H0: all quartile dummies = 0  (Q2 = Q3 = Q4 = 0)
-
 
 wald_cat_ctrl <- wald(lpm_fe_q_controls_cat, keep = "treat_q::")
 wald_rel_ctrl <- wald(lpm_fe_q_controls_rel, keep = "treat_q::")
@@ -3031,44 +3525,83 @@ wald_rel_ctrl
 wald_cou_ctrl
 
 
+# Means of dependent variables on estimation samples: quartile models (religious)
+
+fml_q_cat_noc <- CATHOLIC ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_cat_con <- CATHOLIC ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_q_rel_noc <- RELIGIOUS_PRACTICE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_rel_con <- RELIGIOUS_PRACTICE ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_q_cou_noc <- COUPLE_CATHOLIC ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_cou_con <- COUPLE_CATHOLIC ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+mean_q_cat_noc <- dv_mean_from_data(model_data, fml_q_cat_noc)
+mean_q_cat_con <- dv_mean_from_data(model_data, fml_q_cat_con)
+
+mean_q_rel_noc <- dv_mean_from_data(model_data, fml_q_rel_noc)
+mean_q_rel_con <- dv_mean_from_data(model_data, fml_q_rel_con)
+
+mean_q_cou_noc <- dv_mean_from_data(model_data, fml_q_cou_noc)
+mean_q_cou_con <- dv_mean_from_data(model_data, fml_q_cou_con)
+
+
+# Wald p-values: quartile models (religious)
+pval_q_cat_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_cat, keep = "treat_q::")[["p"]])
+pval_q_cat_con <- sprintf("%.3f", wald_cat_ctrl[["p"]])
+
+pval_q_rel_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_rel, keep = "treat_q::")[["p"]])
+pval_q_rel_con <- sprintf("%.3f", wald_rel_ctrl[["p"]])
+
+pval_q_cou_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_cou, keep = "treat_q::")[["p"]])
+pval_q_cou_con <- sprintf("%.3f", wald_cou_ctrl[["p"]])
+
+add_rows_q_religion <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Catholic (Q bins)"                      = c(sprintf("%.3f", mean_q_cat_noc), "No",  pval_q_cat_noc),
+  "Catholic (Q bins) + Controls"           = c(sprintf("%.3f", mean_q_cat_con), "Yes", pval_q_cat_con),
+  "Religious practice (Q bins)"            = c(sprintf("%.3f", mean_q_rel_noc), "No",  pval_q_rel_noc),
+  "Religious practice (Q bins) + Controls" = c(sprintf("%.3f", mean_q_rel_con), "Yes", pval_q_rel_con),
+  "Catholic partner (Q bins)"              = c(sprintf("%.3f", mean_q_cou_noc), "No",  pval_q_cou_noc),
+  "Catholic partner (Q bins) + Controls"   = c(sprintf("%.3f", mean_q_cou_con), "Yes", pval_q_cou_con)
+)
+
+
 modelsummary(
   list(
-    "Catholic "                        = lpm_fe_q_nocontrols_cat,
-    "Catholic (Q bins) + Controls"             = lpm_fe_q_controls_cat,
-    "Religious practice (Q bins)"              = lpm_fe_q_nocontrols_rel,
-    "Religious practice (Q bins) + Controls"   = lpm_fe_q_controls_rel,
-    "Couple catholic (Q bins)"                 = lpm_fe_q_nocontrols_cou,
-    "Couple catholic (Q bins) + Controls"      = lpm_fe_q_controls_cou
+    "Catholic (Q bins)"                      = lpm_fe_q_nocontrols_cat,
+    "Catholic (Q bins) + Controls"           = lpm_fe_q_controls_cat,
+    "Religious practice (Q bins)"            = lpm_fe_q_nocontrols_rel,
+    "Religious practice (Q bins) + Controls" = lpm_fe_q_controls_rel,
+    "Catholic partner (Q bins)"              = lpm_fe_q_nocontrols_cou,
+    "Catholic partner (Q bins) + Controls"   = lpm_fe_q_controls_cou
   ),
   title = "LPM with quartile dummies of standardized childhood dry days (religious outcomes)",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Catholic (Q bins)`                      = "No",
-    `Catholic (Q bins) + Controls`           = "Yes",
-    `Religious practice (Q bins)`            = "No",
-    `Religious practice (Q bins) + Controls` = "Yes",
-    `Couple catholic (Q bins)`               = "No",
-    `Couple catholic (Q bins) + Controls`    = "Yes"
-  )
+  coef_rename = q_labels,
+  add_rows = add_rows_q_religion
 )
 
+# 4) Quartiles: Political outcomes
 
-# Political outcomes: PARTICIPATION, CONSERVATIVE_VOTE, LEFT_RIGHT
 
-# PARTICIPATION
 lpm_fe_q_nocontrols_par <- feols(
   PARTICIPATION ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_q_controls_par <- feols(
@@ -3076,15 +3609,14 @@ lpm_fe_q_controls_par <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
-# CONSERVATIVE VOTE
 lpm_fe_q_nocontrols_con <- feols(
   CONSERVATIVE_VOTE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_q_controls_con <- feols(
@@ -3092,15 +3624,14 @@ lpm_fe_q_controls_con <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
-# LEFT-RIGHT SCALE
 lpm_fe_q_nocontrols_lr <- feols(
   LEFT_RIGHT ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_q_controls_lr <- feols(
@@ -3108,203 +3639,91 @@ lpm_fe_q_controls_lr <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
-
-
-# Joint tests (political outcomes)
-# H0: all quartile dummies = 0
-
 
 wald_par_ctrl <- wald(lpm_fe_q_controls_par, keep = "treat_q::")
 wald_con_ctrl <- wald(lpm_fe_q_controls_con, keep = "treat_q::")
-wald_lr_ctrl  <- wald(lpm_fe_q_controls_lr,  keep = "treat_q::")
+wald_lr_ctrl  <- wald(lpm_fe_q_controls_lr, keep = "treat_q::")
 
 wald_par_ctrl
 wald_con_ctrl
 wald_lr_ctrl
 
+# Means of dependent variables on estimation samples: quartile models (political)
+
+fml_q_par_noc <- PARTICIPATION ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_par_con <- PARTICIPATION ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_q_con_noc <- CONSERVATIVE_VOTE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_con_con <- CONSERVATIVE_VOTE ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_q_lr_noc <- LEFT_RIGHT ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_lr_con <- LEFT_RIGHT ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+mean_q_par_noc <- dv_mean_from_data(model_data, fml_q_par_noc)
+mean_q_par_con <- dv_mean_from_data(model_data, fml_q_par_con)
+
+mean_q_con_noc <- dv_mean_from_data(model_data, fml_q_con_noc)
+mean_q_con_con <- dv_mean_from_data(model_data, fml_q_con_con)
+
+mean_q_lr_noc <- dv_mean_from_data(model_data, fml_q_lr_noc)
+mean_q_lr_con <- dv_mean_from_data(model_data, fml_q_lr_con)
+
+# Wald p-values: quartile models (political)
+pval_q_par_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_par, keep = "treat_q::")[["p"]])
+pval_q_par_con <- sprintf("%.3f", wald_par_ctrl[["p"]])
+
+pval_q_con_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_con, keep = "treat_q::")[["p"]])
+pval_q_con_con <- sprintf("%.3f", wald_con_ctrl[["p"]])
+
+pval_q_lr_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_lr, keep = "treat_q::")[["p"]])
+pval_q_lr_con <- sprintf("%.3f", wald_lr_ctrl[["p"]])
+
+add_rows_q_politics <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Participation (Q bins)"             = c(sprintf("%.3f", mean_q_par_noc), "No",  pval_q_par_noc),
+  "Participation (Q bins) + Controls"  = c(sprintf("%.3f", mean_q_par_con), "Yes", pval_q_par_con),
+  "Conservative (Q bins)"              = c(sprintf("%.3f", mean_q_con_noc), "No",  pval_q_con_noc),
+  "Conservative (Q bins) + Controls"   = c(sprintf("%.3f", mean_q_con_con), "Yes", pval_q_con_con),
+  "Left-right (Q bins)"                = c(sprintf("%.3f", mean_q_lr_noc), "No",  pval_q_lr_noc),
+  "Left-right (Q bins) + Controls"     = c(sprintf("%.3f", mean_q_lr_con), "Yes", pval_q_lr_con)
+)
 modelsummary(
   list(
-    "Participation (Q bins)"                  = lpm_fe_q_nocontrols_par,
-    "Participation (Q bins) + Controls"       = lpm_fe_q_controls_par,
-    "Conservative (Q bins)"                   = lpm_fe_q_nocontrols_con,
-    "Conservative (Q bins) + Controls"        = lpm_fe_q_controls_con,
-    "Left-right (Q bins)"                     = lpm_fe_q_nocontrols_lr,
-    "Left-right (Q bins) + Controls"          = lpm_fe_q_controls_lr
+    "Participation (Q bins)"             = lpm_fe_q_nocontrols_par,
+    "Participation (Q bins) + Controls"  = lpm_fe_q_controls_par,
+    "Conservative (Q bins)"              = lpm_fe_q_nocontrols_con,
+    "Conservative (Q bins) + Controls"   = lpm_fe_q_controls_con,
+    "Left-right (Q bins)"                = lpm_fe_q_nocontrols_lr,
+    "Left-right (Q bins) + Controls"     = lpm_fe_q_controls_lr
   ),
   title = "LPM with quartile dummies of standardized childhood dry days (political outcomes)",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Participation (Q bins)`             = "No",
-    `Participation (Q bins) + Controls`  = "Yes",
-    `Conservative (Q bins)`              = "No",
-    `Conservative (Q bins) + Controls`   = "Yes",
-    `Left-right (Q bins)`                = "No",
-    `Left-right (Q bins) + Controls`     = "Yes"
-  )
+  coef_rename = q_labels,
+  add_rows = add_rows_q_politics
 )
 
+# 5) Quartiles: Other outcomes
 
 
-library(broom)
-library(dplyr)
-library(ggplot2)
-library(purrr)
-
-
-# Religious outcomes: extract estimates
-
-religious_models_q <- list(
-  Catholic           = lpm_fe_q_controls_cat,
-  ReligiousPractice  = lpm_fe_q_controls_rel,
-  CoupleCatholic     = lpm_fe_q_controls_cou
-)
-
-coef_religious_q <- map_dfr(
-  religious_models_q,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_q::", term)) %>%
-  mutate(
-    Quartile = recode(term,
-                      "treat_q::2" = "Q2 vs Q1",
-                      "treat_q::3" = "Q3 vs Q1",
-                      "treat_q::4" = "Q4 vs Q1")
-  )
-
-
-# Political outcomes: extract estimates
-
-political_models_q <- list(
-  Participation = lpm_fe_q_controls_par,
-  Conservative  = lpm_fe_q_controls_con,
-  LeftRight     = lpm_fe_q_controls_lr
-)
-
-coef_political_q <- map_dfr(
-  political_models_q,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_q::", term)) %>%
-  mutate(
-    Quartile = recode(term,
-                      "treat_q::2" = "Q2 vs Q1",
-                      "treat_q::3" = "Q3 vs Q1",
-                      "treat_q::4" = "Q4 vs Q1")
-  )
-
-
-# Plot: Religious Outcomes (Quartile Dummies)
-
-ggplot(coef_religious_q, aes(x = Quartile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Dry Days Quartiles on Religious Outcomes",
-    y = "Coefficient (95% CI)", x = NULL
-  ) +
-  theme_minimal()
-
-
-# Plot: Political Outcomes (Quartile Dummies)
-
-ggplot(coef_political_q, aes(x = Quartile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Dry Days Quartiles on Political Outcomes",
-    y = "Coefficient (95% CI)", x = NULL
-  ) +
-  theme_minimal()
-
-# Prepare ADRF-style data for religious outcomes
-adrf_data_religious <- coef_religious_q %>%
-  mutate(
-    treat_level = case_when(
-      Quartile == "Q2 vs Q1" ~ 2,
-      Quartile == "Q3 vs Q1" ~ 3,
-      Quartile == "Q4 vs Q1" ~ 4
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(coef_religious_q$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-# Plot ADRF approximation
-p_adrf_q_rel <- plot_adrf(
-  df      = adrf_data_religious,
-  nbins   = 4,
-  xlabels = paste0("Q", 1:4),
-  title   = "Religious Outcomes — Quartiles",
-  line_color = "#1f77b4"
-)
-
-p_adrf_q_rel
-
-
-adrf_data_political <- coef_political_q %>%
-  mutate(
-    treat_level = case_when(
-      Quartile == "Q2 vs Q1" ~ 2,
-      Quartile == "Q3 vs Q1" ~ 3,
-      Quartile == "Q4 vs Q1" ~ 4
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(coef_political_q$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-# Plot
-p_adrf_q_pol <- plot_adrf(
-  df      = adrf_data_political,
-  nbins   = 4,
-  xlabels = paste0("Q", 1:4),
-  title   = "Political Outcomes — Quartiles",
-  line_color = "#1f77b4"
-)
-
-p_adrf_q_pol
-
-
-
-
-
-
-# 2) OTHER outcomes regressions 
-
-# INCOME
 lpm_fe_q_nocontrols_inc <- feols(
   INCOME ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
@@ -3313,14 +3732,13 @@ lpm_fe_q_controls_inc <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
-# EDUCATION
 lpm_fe_q_nocontrols_edu <- feols(
   EDUCATION ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
@@ -3329,14 +3747,13 @@ lpm_fe_q_controls_edu <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
-# TRUST IN PEOPLE
 lpm_fe_q_nocontrols_trust <- feols(
   TRUST_PEOPLE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
@@ -3345,23 +3762,68 @@ lpm_fe_q_controls_trust <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
-
-# 3) Joint tests (OTHER outcomes): H0: Q2 = Q3 = Q4 = 0 
-
-wald_inc_q_ctrl   <- wald(lpm_fe_q_controls_inc,   keep = "treat_q::")
-wald_edu_q_ctrl   <- wald(lpm_fe_q_controls_edu,   keep = "treat_q::")
+wald_inc_q_ctrl   <- wald(lpm_fe_q_controls_inc, keep = "treat_q::")
+wald_edu_q_ctrl   <- wald(lpm_fe_q_controls_edu, keep = "treat_q::")
 wald_trust_q_ctrl <- wald(lpm_fe_q_controls_trust, keep = "treat_q::")
 
 wald_inc_q_ctrl
 wald_edu_q_ctrl
 wald_trust_q_ctrl
 
+# Means of dependent variables on estimation samples: quartile models (other outcomes)
 
-# 4) Table (OTHER outcomes) 
+fml_q_inc_noc <- INCOME ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_inc_con <- INCOME ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_q_edu_noc <- EDUCATION ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_edu_con <- EDUCATION ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+fml_q_tru_noc <- TRUST_PEOPLE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac
+fml_q_tru_con <- TRUST_PEOPLE ~ i(treat_q, ref = 1) + FEMALE +
+  FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+  FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+  survey_year + log_pop_birth | BIRTH + prov_nac
+
+mean_q_inc_noc <- dv_mean_from_data(model_data, fml_q_inc_noc)
+mean_q_inc_con <- dv_mean_from_data(model_data, fml_q_inc_con)
+
+mean_q_edu_noc <- dv_mean_from_data(model_data, fml_q_edu_noc)
+mean_q_edu_con <- dv_mean_from_data(model_data, fml_q_edu_con)
+
+mean_q_tru_noc <- dv_mean_from_data(model_data, fml_q_tru_noc)
+mean_q_tru_con <- dv_mean_from_data(model_data, fml_q_tru_con)
+
+# Wald p-values: quartile models (other outcomes)
+pval_q_inc_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_inc, keep = "treat_q::")[["p"]])
+pval_q_inc_con <- sprintf("%.3f", wald_inc_q_ctrl[["p"]])
+
+pval_q_edu_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_edu, keep = "treat_q::")[["p"]])
+pval_q_edu_con <- sprintf("%.3f", wald_edu_q_ctrl[["p"]])
+
+pval_q_tru_noc <- sprintf("%.3f", wald(lpm_fe_q_nocontrols_trust, keep = "treat_q::")[["p"]])
+pval_q_tru_con <- sprintf("%.3f", wald_trust_q_ctrl[["p"]])
+
+
+add_rows_q_other <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Income (Q bins)"                  = c(sprintf("%.3f", mean_q_inc_noc), "No",  pval_q_inc_noc),
+  "Income (Q bins) + Controls"       = c(sprintf("%.3f", mean_q_inc_con), "Yes", pval_q_inc_con),
+  "Education (Q bins)"               = c(sprintf("%.3f", mean_q_edu_noc), "No",  pval_q_edu_noc),
+  "Education (Q bins) + Controls"    = c(sprintf("%.3f", mean_q_edu_con), "Yes", pval_q_edu_con),
+  "Trust people (Q bins)"            = c(sprintf("%.3f", mean_q_tru_noc), "No",  pval_q_tru_noc),
+  "Trust people (Q bins) + Controls" = c(sprintf("%.3f", mean_q_tru_con), "Yes", pval_q_tru_con)
+)
 
 modelsummary(
   list(
@@ -3376,30 +3838,25 @@ modelsummary(
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Income (Q bins)`                  = "No",
-    `Income (Q bins) + Controls`       = "Yes",
-    `Education (Q bins)`               = "No",
-    `Education (Q bins) + Controls`    = "Yes",
-    `Trust people (Q bins)`            = "No",
-    `Trust people (Q bins) + Controls` = "Yes"
-  )
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
+  coef_rename = q_labels,
+  add_rows = add_rows_q_other
 )
 
+# 6) Quartiles: Extract coefficients and build plots
 
-# 5) Plot: coefficients + 95% CI (OTHER outcomes) 
 
-library(broom)
-library(dplyr)
-library(ggplot2)
-library(purrr)
+religious_models_q <- list(
+  Catholic           = lpm_fe_q_controls_cat,
+  ReligiousPractice  = lpm_fe_q_controls_rel,
+  CoupleCatholic     = lpm_fe_q_controls_cou
+)
+
+political_models_q <- list(
+  Participation = lpm_fe_q_controls_par,
+  Conservative  = lpm_fe_q_controls_con,
+  LeftRight     = lpm_fe_q_controls_lr
+)
 
 other_models_q <- list(
   Income      = lpm_fe_q_controls_inc,
@@ -3407,80 +3864,87 @@ other_models_q <- list(
   TrustPeople = lpm_fe_q_controls_trust
 )
 
-coef_other_q <- map_dfr(
-  other_models_q,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_q::", term)) %>%
+coef_religious_q <- extract_binned_effects(religious_models_q, "treat_q", q_labels) %>%
   mutate(
-    Quartile = recode(term,
-                      "treat_q::2" = "Q2 vs Q1",
-                      "treat_q::3" = "Q3 vs Q1",
-                      "treat_q::4" = "Q4 vs Q1")
+    Outcome  = recode(Outcome, !!!pretty_outcomes),
+    Outcome  = factor(
+      Outcome,
+      levels = c("Catholic", "Religious practice", "Catholic partner")
+    ),
+    Quartile = recode(term, !!!q_labels)
   )
 
-ggplot(coef_other_q, aes(x = Quartile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Dry Days Quartiles on Other Outcomes",
-    y = "Coefficient (95% CI)", x = NULL
-  ) +
-  theme_minimal()
-
-
-# ADRF-style plot (OTHER outcomes) 
-
-adrf_data_other <- coef_other_q %>%
+coef_political_q <- extract_binned_effects(political_models_q, "treat_q", q_labels) %>%
   mutate(
-    treat_level = case_when(
-      Quartile == "Q2 vs Q1" ~ 2,
-      Quartile == "Q3 vs Q1" ~ 3,
-      Quartile == "Q4 vs Q1" ~ 4
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome     = unique(coef_other_q$Outcome),
-      treat_level = 1,
-      estimate    = 0,
-      conf.low    = 0,
-      conf.high   = 0
-    )
+    Outcome  = recode(Outcome, !!!pretty_outcomes),
+    Outcome  = factor(
+      Outcome,
+      levels = c("Participation", "Conservative vote", "Left-right scale")
+    ),
+    Quartile = recode(term, !!!q_labels)
   )
+coef_other_q <- extract_binned_effects(other_models_q, "treat_q", q_labels) %>%
+  mutate(
+    Outcome  = recode(Outcome, !!!pretty_outcomes),
+    Quartile = recode(term, !!!q_labels)
+  )
+
+p_coef_q_rel <- plot_bin_coefficients(
+  coef_religious_q,
+  xvar = "Quartile"
+)
+
+p_coef_q_pol <- plot_bin_coefficients(
+  coef_political_q,
+  xvar = "Quartile"
+)
+
+p_coef_q_other <- plot_bin_coefficients(
+  coef_other_q,
+  xvar = "Quartile"
+)
+
+p_coef_q_rel
+p_coef_q_pol
+p_coef_q_other
+
+adrf_data_religious <- build_adrf_data(coef_religious_q)
+adrf_data_political <- build_adrf_data(coef_political_q)
+adrf_data_other     <- build_adrf_data(coef_other_q)
+
+p_adrf_q_rel <- plot_adrf(
+  df      = adrf_data_religious,
+  nbins   = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab    = "Effect relative to Q1"
+)
+
+p_adrf_q_pol <- plot_adrf(
+  df      = adrf_data_political,
+  nbins   = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab    = "Effect relative to Q1"
+)
 
 p_adrf_q_other <- plot_adrf(
   df      = adrf_data_other,
   nbins   = 4,
   xlabels = paste0("Q", 1:4),
-  title   = "Other Outcomes — Quartiles",
-  line_color = "#1f77b4"
+  ylab    = "Effect relative to Q1"
 )
 
+p_adrf_q_rel
+p_adrf_q_pol
 p_adrf_q_other
 
 
+# 7) Tertiles: Religious outcomes
 
-# Non-parametric identification: tertile dummies of treatment -----------------------------
 
-# 1) Tertiles of standardized treatment (overall distribution)
-model_data <- model_data %>%
-  mutate(
-    treat_t = ntile(childhood_total_dry_days_std, 3)  # 1 = low, 2 = mid, 3 = high exposure
-  )
-
-table(model_data$treat_t, useNA = "ifany")  # sanity check
-
-# Religious outcomes: CATHOLIC, RELIGIOUS_PRACTICE, COUPLE_CATHOLIC
-
-# CATHOLIC
 lpm_fe_t_nocontrols_cat <- feols(
   CATHOLIC ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_t_controls_cat <- feols(
@@ -3488,44 +3952,40 @@ lpm_fe_t_controls_cat <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
-# RELIGIOUS PRACTICE
 lpm_fe_t_nocontrols_rel <- feols(
   RELIGIOUS_PRACTICE ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
 lpm_fe_t_controls_rel <- feols(
   RELIGIOUS_PRACTICE ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year + log_pop_birth| BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
-# COUPLE CATHOLIC
 lpm_fe_t_nocontrols_cou <- feols(
   COUPLE_CATHOLIC ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-) 
+  data = model_data,
+  cluster = ~ prov_nac
+)
 
 lpm_fe_t_controls_cou <- feols(
   COUPLE_CATHOLIC ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year  + log_pop_birth  | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
+  cluster = ~ prov_nac
 )
 
-# Joint tests (religious outcomes)
-# H0: treat_t::2 = treat_t::3 = 0
 wald_cat_t_ctrl <- wald(lpm_fe_t_controls_cat, keep = "treat_t::")
 wald_rel_t_ctrl <- wald(lpm_fe_t_controls_rel, keep = "treat_t::")
 wald_cou_t_ctrl <- wald(lpm_fe_t_controls_cou, keep = "treat_t::")
@@ -3536,43 +3996,39 @@ wald_cou_t_ctrl
 
 modelsummary(
   list(
-    "Catholic (T bins)"                        = lpm_fe_t_nocontrols_cat,
-    "Catholic (T bins) + Controls"             = lpm_fe_t_controls_cat,
-    "Religious practice (T bins)"              = lpm_fe_t_nocontrols_rel,
-    "Religious practice (T bins) + Controls"   = lpm_fe_t_controls_rel,
-    "Couple catholic (T bins)"                 = lpm_fe_t_nocontrols_cou,
-    "Couple catholic (T bins) + Controls"      = lpm_fe_t_controls_cou
+    "Catholic (T bins)"                      = lpm_fe_t_nocontrols_cat,
+    "Catholic (T bins) + Controls"           = lpm_fe_t_controls_cat,
+    "Religious practice (T bins)"            = lpm_fe_t_nocontrols_rel,
+    "Religious practice (T bins) + Controls" = lpm_fe_t_controls_rel,
+    "Catholic partner (T bins)"              = lpm_fe_t_nocontrols_cou,
+    "Catholic partner (T bins) + Controls"   = lpm_fe_t_controls_cou
   ),
   title = "LPM with tertile dummies of standardized childhood dry days (religious outcomes)",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
+  coef_rename = t_labels,
   add_rows = tibble(
     term = "Controls",
     `Catholic (T bins)`                      = "No",
     `Catholic (T bins) + Controls`           = "Yes",
     `Religious practice (T bins)`            = "No",
     `Religious practice (T bins) + Controls` = "Yes",
-    `Couple catholic (T bins)`               = "No",
-    `Couple catholic (T bins) + Controls`    = "Yes"
+    `Catholic partner (T bins)`              = "No",
+    `Catholic partner (T bins) + Controls`   = "Yes"
   )
 )
 
-# Political outcomes: PARTICIPATION, CONSERVATIVE_VOTE, LEFT_RIGHT
+
+# 8) Tertiles: Political outcomes
 
 
-# PARTICIPATION
 lpm_fe_t_nocontrols_par <- feols(
   PARTICIPATION ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
   data = model_data,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
-
 
 lpm_fe_t_controls_par <- feols(
   PARTICIPATION ~ i(treat_t, ref = 1) + FEMALE +
@@ -3580,17 +4036,14 @@ lpm_fe_t_controls_par <- feols(
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
 
-
-# CONSERVATIVE VOTE
 lpm_fe_t_nocontrols_con <- feols(
   CONSERVATIVE_VOTE ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
   data = model_data,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
-
 
 lpm_fe_t_controls_con <- feols(
   CONSERVATIVE_VOTE ~ i(treat_t, ref = 1) + FEMALE +
@@ -3598,236 +4051,65 @@ lpm_fe_t_controls_con <- feols(
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
 
-
-# LEFT-RIGHT SCALE
 lpm_fe_t_nocontrols_lr <- feols(
   LEFT_RIGHT ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
   data = model_data,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
-
 
 lpm_fe_t_controls_lr <- feols(
   LEFT_RIGHT ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year  + log_pop_birth | BIRTH + prov_nac,
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
 
-
-# Joint tests (political outcomes)
-# H0: treat_t::2 = treat_t::3 = 0
 wald_par_t_ctrl <- wald(lpm_fe_t_controls_par, keep = "treat_t::")
 wald_con_t_ctrl <- wald(lpm_fe_t_controls_con, keep = "treat_t::")
-wald_lr_t_ctrl <- wald(lpm_fe_t_controls_lr, keep = "treat_t::")
-
+wald_lr_t_ctrl  <- wald(lpm_fe_t_controls_lr, keep = "treat_t::")
 
 wald_par_t_ctrl
 wald_con_t_ctrl
 wald_lr_t_ctrl
 
-
 modelsummary(
   list(
-    "Participation (T bins)" = lpm_fe_t_nocontrols_par,
-    "Participation (T bins) + Controls" = lpm_fe_t_controls_par,
-    "Conservative (T bins)" = lpm_fe_t_nocontrols_con,
-    "Conservative (T bins) + Controls" = lpm_fe_t_controls_con,
-    "Left-right (T bins)" = lpm_fe_t_nocontrols_lr,
-    "Left-right (T bins) + Controls" = lpm_fe_t_controls_lr
+    "Participation (T bins)"             = lpm_fe_t_nocontrols_par,
+    "Participation (T bins) + Controls"  = lpm_fe_t_controls_par,
+    "Conservative (T bins)"              = lpm_fe_t_nocontrols_con,
+    "Conservative (T bins) + Controls"   = lpm_fe_t_controls_con,
+    "Left-right (T bins)"                = lpm_fe_t_nocontrols_lr,
+    "Left-right (T bins) + Controls"     = lpm_fe_t_controls_lr
   ),
   title = "LPM with tertile dummies of standardized childhood dry days (political outcomes)",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
+  coef_rename = t_labels,
   add_rows = tibble(
     term = "Controls",
-    `Participation (T bins)` = "No",
-    `Participation (T bins) + Controls` = "Yes",
-    `Conservative (T bins)` = "No",
-    `Conservative (T bins) + Controls` = "Yes",
-    `Left-right (T bins)` = "No",
-    `Left-right (T bins) + Controls` = "Yes"
+    `Participation (T bins)`             = "No",
+    `Participation (T bins) + Controls`  = "Yes",
+    `Conservative (T bins)`              = "No",
+    `Conservative (T bins) + Controls`   = "Yes",
+    `Left-right (T bins)`                = "No",
+    `Left-right (T bins) + Controls`     = "Yes"
   )
 )
 
 
-
-# Extract coefficients and CIs
-religious_models <- list(
-  Catholic           = lpm_fe_t_controls_cat,
-  ReligiousPractice  = lpm_fe_t_controls_rel,
-  CoupleCatholic     = lpm_fe_t_controls_cou
-)
-
-coef_df <- purrr::map_dfr(
-  religious_models,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1")
-  )
-
-# Plot
-ggplot(coef_df, aes(x = Tertile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Childhood Dry Days (Tertile Dummies)",
-    x = NULL,
-    y = "Coefficient Estimate (95% CI)"
-  ) +
-  theme_minimal()
-
-political_models <- list(
-  Participation = lpm_fe_t_controls_par,
-  Conservative  = lpm_fe_t_controls_con,
-  LeftRight     = lpm_fe_t_controls_lr
-)
-
-coef_df <- purrr::map_dfr(
-  political_models,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1")
-  )
+# 9) Tertiles: Other outcomes
 
 
-# Plot
-ggplot(coef_df, aes(x = Tertile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Childhood Dry Days (Tertile Dummies)",
-    x = NULL,
-    y = "Coefficient Estimate (95% CI)"
-  ) +
-  theme_minimal()
-
-
-# Step 1: Extract coefficients from religious models (with controls)
-
-religious_models_t <- list(
-  Catholic           = lpm_fe_t_controls_cat,
-  ReligiousPractice  = lpm_fe_t_controls_rel,
-  CoupleCatholic     = lpm_fe_t_controls_cou
-)
-
-coef_religious_t <- map_dfr(
-  religious_models_t,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1"),
-    treat_level = case_when(
-      Tertile == "T2 vs T1" ~ 2,
-      Tertile == "T3 vs T1" ~ 3
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(.$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-
-# Step 2: Repeat for political models
-
-political_models_t <- list(
-  Participation = lpm_fe_t_controls_par,
-  Conservative  = lpm_fe_t_controls_con,
-  LeftRight     = lpm_fe_t_controls_lr
-)
-
-coef_political_t <- map_dfr(
-  political_models_t,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1"),
-    treat_level = case_when(
-      Tertile == "T2 vs T1" ~ 2,
-      Tertile == "T3 vs T1" ~ 3
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(.$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-
-# Step 3: Plot ADRF-style graphs
-
-
-# Religious Outcomes ADRF Plot
-p_adrf_t_rel <- plot_adrf(
-  df      = coef_religious_t,
-  nbins   = 3,
-  xlabels = paste0("T", 1:3),
-  title   = "Religious Outcomes — Tertiles",
-  line_color = "#1f77b4"
-)
-
-p_adrf_t_rel
-
-
-p_adrf_t_pol <- plot_adrf(
-  df      = coef_political_t,
-  nbins   = 3,
-  xlabels = paste0("T", 1:3),
-  title   = "Political Outcomes — Tertiles",
-  line_color = "#1f77b4"
-)
-
-p_adrf_t_pol
-
-
-# 1) OTHER outcomes regressions 
-
-# INCOME
 lpm_fe_t_nocontrols_inc <- feols(
   INCOME ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
@@ -3835,15 +4117,14 @@ lpm_fe_t_controls_inc <- feols(
   INCOME ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year  + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
-# EDUCATION
 lpm_fe_t_nocontrols_edu <- feols(
   EDUCATION ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
@@ -3852,39 +4133,32 @@ lpm_fe_t_controls_edu <- feols(
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
-# TRUST IN PEOPLE
 lpm_fe_t_nocontrols_trust <- feols(
   TRUST_PEOPLE ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
 lpm_fe_t_controls_trust <- feols(
   TRUST_PEOPLE ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT  +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
     survey_year + log_pop_birth | BIRTH + prov_nac,
-  data    = model_data,
+  data = model_data,
   cluster = ~ prov_nac
 )
 
-
-# 2) Joint tests (OTHER outcomes): H0: T2 = T3 = 0 
-
-wald_inc_t_ctrl   <- wald(lpm_fe_t_controls_inc,   keep = "treat_t::")
-wald_edu_t_ctrl   <- wald(lpm_fe_t_controls_edu,   keep = "treat_t::")
+wald_inc_t_ctrl   <- wald(lpm_fe_t_controls_inc, keep = "treat_t::")
+wald_edu_t_ctrl   <- wald(lpm_fe_t_controls_edu, keep = "treat_t::")
 wald_trust_t_ctrl <- wald(lpm_fe_t_controls_trust, keep = "treat_t::")
 
 wald_inc_t_ctrl
 wald_edu_t_ctrl
 wald_trust_t_ctrl
-
-
-# 3) Table (OTHER outcomes) 
 
 modelsummary(
   list(
@@ -3899,11 +4173,8 @@ modelsummary(
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
+  coef_rename = t_labels,
   add_rows = tibble(
     term = "Controls",
     `Income (T bins)`                  = "No",
@@ -3916,12 +4187,20 @@ modelsummary(
 )
 
 
-# 4) Plot: coefficients + 95% CI (OTHER outcomes) 
+# 10) Tertiles: Extract coefficients and build plots
 
-library(broom)
-library(dplyr)
-library(ggplot2)
-library(purrr)
+
+religious_models_t <- list(
+  Catholic           = lpm_fe_t_controls_cat,
+  ReligiousPractice  = lpm_fe_t_controls_rel,
+  CoupleCatholic     = lpm_fe_t_controls_cou
+)
+
+political_models_t <- list(
+  Participation = lpm_fe_t_controls_par,
+  Conservative  = lpm_fe_t_controls_con,
+  LeftRight     = lpm_fe_t_controls_lr
+)
 
 other_models_t <- list(
   Income      = lpm_fe_t_controls_inc,
@@ -3929,71 +4208,210 @@ other_models_t <- list(
   TrustPeople = lpm_fe_t_controls_trust
 )
 
-coef_other_t <- map_dfr(
-  other_models_t,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
+coef_religious_t <- extract_binned_effects(religious_models_t, "treat_t", t_labels) %>%
   mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1")
+    Outcome = recode(Outcome, !!!pretty_outcomes),
+    Tertile = recode(term, !!!t_labels)
   )
 
-ggplot(coef_other_t, aes(x = Tertile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Childhood Dry Days (Tertile Dummies) on Other Outcomes",
-    x = NULL,
-    y = "Coefficient Estimate (95% CI)"
-  ) +
-  theme_minimal()
-
-
-# 5) Optional: ADRF-style plot (OTHER outcomes) 
-
-adrf_data_other_t <- coef_other_t %>%
+coef_political_t <- extract_binned_effects(political_models_t, "treat_t", t_labels) %>%
   mutate(
-    treat_level = case_when(
-      Tertile == "T2 vs T1" ~ 2,
-      Tertile == "T3 vs T1" ~ 3
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome     = unique(coef_other_t$Outcome),
-      treat_level = 1,
-      estimate    = 0,
-      conf.low    = 0,
-      conf.high   = 0
-    )
+    Outcome = recode(Outcome, !!!pretty_outcomes),
+    Tertile = recode(term, !!!t_labels)
   )
+
+coef_other_t <- extract_binned_effects(other_models_t, "treat_t", t_labels) %>%
+  mutate(
+    Outcome = recode(Outcome, !!!pretty_outcomes),
+    Tertile = recode(term, !!!t_labels)
+  )
+
+p_coef_t_rel <- plot_bin_coefficients(
+  coef_religious_t,
+  xvar = "Tertile"
+)
+
+p_coef_t_pol <- plot_bin_coefficients(
+  coef_political_t,
+  xvar = "Tertile"
+)
+
+p_coef_t_other <- plot_bin_coefficients(
+  coef_other_t,
+  xvar = "Tertile"
+)
+
+p_coef_t_rel
+p_coef_t_pol
+p_coef_t_other
+
+adrf_data_religious_t <- build_adrf_data(coef_religious_t)
+adrf_data_political_t <- build_adrf_data(coef_political_t)
+adrf_data_other_t     <- build_adrf_data(coef_other_t)
+
+p_adrf_t_rel <- plot_adrf(
+  df      = adrf_data_religious_t,
+  nbins   = 3,
+  xlabels = paste0("T", 1:3),
+  ylab    = "Effect relative to T1"
+)
+
+p_adrf_t_pol <- plot_adrf(
+  df      = adrf_data_political_t,
+  nbins   = 3,
+  xlabels = paste0("T", 1:3),
+  ylab    = "Effect relative to T1"
+)
 
 p_adrf_t_other <- plot_adrf(
   df      = adrf_data_other_t,
   nbins   = 3,
   xlabels = paste0("T", 1:3),
-  title   = "Other Outcomes — Tertiles",
-  line_color = "#1f77b4"
+  ylab    = "Effect relative to T1"
 )
 
+p_adrf_t_rel
+p_adrf_t_pol
 p_adrf_t_other
 
 
+# 11) Export figures for LaTeX
+
+
+if (!dir.exists("figures")) dir.create("figures")
+
+save_latex_plot(p_adrf_q_rel,   "adrf_quartiles_religious")
+save_latex_plot(p_adrf_q_pol,   "adrf_quartiles_political")
+save_latex_plot(p_adrf_q_other, "adrf_quartiles_other")
+
+save_latex_plot(p_adrf_t_rel,   "adrf_tertiles_religious")
+save_latex_plot(p_adrf_t_pol,   "adrf_tertiles_political")
+save_latex_plot(p_adrf_t_other, "adrf_tertiles_other")
+
+save_latex_plot(p_coef_q_rel,   "coef_quartiles_religious")
+save_latex_plot(p_coef_q_pol,   "coef_quartiles_political")
+save_latex_plot(p_coef_q_other, "coef_quartiles_other")
+
+save_latex_plot(p_coef_t_rel,   "coef_tertiles_religious")
+save_latex_plot(p_coef_t_pol,   "coef_tertiles_political")
+save_latex_plot(p_coef_t_other, "coef_tertiles_other")
+
+# Rain does not predict migration -----------------------------------------
+
+# ---------------------------------------------------------
+# EXTRA OUTCOME: SAME_LOC_BIRTH
+#   - Quadratic spec (std + std^2)
+#   - Quartile dummies of standardized treatment
+#   - Tables like your previous modelsummary blocks:
+#       * no DV mean row
+#       * no fetch_data / dv_mean helper
+# ---------------------------------------------------------
+
+# (safety) make sure SAME_LOC_BIRTH is in model_data
+if (!("SAME_LOC_BIRTH" %in% names(model_data))) {
+  stop("SAME_LOC_BIRTH is not in model_data. Add it to your dplyr::select(...) when building model_data.")
+}
+
+# --------------------------
+# A) Quadratic specification
+# --------------------------
+
+# 1) With FE, No controls
+lpm_fe_nocontrols_same <- feols(
+  SAME_LOC_BIRTH ~ childhood_total_dry_days_std + survey_year + I(childhood_total_dry_days_std^2) | BIRTH + prov_nac,
+  data    = model_data,
+  cluster = ~ prov_nac
+)
+
+# 2) With FE, With controls
+lpm_fe_controls_same <- feols(
+  SAME_LOC_BIRTH ~ childhood_total_dry_days_std + FEMALE + I(childhood_total_dry_days_std^2) +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data    = model_data,
+  cluster = ~ prov_nac
+)
+
+modelsummary(
+  list(
+    "Same loc (quad)"               = lpm_fe_nocontrols_same,
+    "Same loc (quad) + Controls"    = lpm_fe_controls_same
+  ),
+  title = "Outcome: SAME_LOC_BIRTH (quadratic specification)",
+  output = "latex",
+  stars  = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
+  add_rows = tibble::tibble(
+    term = "Controls",
+    `Same loc (quad)`            = "No",
+    `Same loc (quad) + Controls` = "Yes"
+  )
+)
+
+# --------------------------
+# B) Quartile specification
+# --------------------------
+
+# define quartiles on standardized treatment (same convention as your Q-bins section)
+model_data <- model_data %>%
+  mutate(treat_q = ntile(childhood_total_dry_days_std, 4))
+
+# 1) With FE, No controls
+lpm_fe_q_nocontrols_same <- feols(
+  SAME_LOC_BIRTH ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
+  data    = model_data,
+  cluster = ~ prov_nac
+)
+
+# 2) With FE, With controls
+lpm_fe_q_controls_same <- feols(
+  SAME_LOC_BIRTH ~ i(treat_q, ref = 1) + FEMALE +
+    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth | BIRTH + prov_nac,
+  data    = model_data,
+  cluster = ~ prov_nac
+)
+
+# optional joint test: H0 Q2=Q3=Q4=0
+wald_same_q_ctrl <- wald(lpm_fe_q_controls_same, keep = "treat_q::")
+wald_same_q_ctrl
+
+modelsummary(
+  list(
+    "Same loc (Q bins)"            = lpm_fe_q_nocontrols_same,
+    "Same loc (Q bins) + Controls" = lpm_fe_q_controls_same
+  ),
+  title = "Outcome: SAME_LOC_BIRTH (quartile dummies of standardized treatment)",
+  output = "latex",
+  stars  = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
+  coef_rename = c(
+    "treat_q::2" = "Q2 vs Q1",
+    "treat_q::3" = "Q3 vs Q1",
+    "treat_q::4" = "Q4 vs Q1"
+  ),
+  add_rows = tibble::tibble(
+    term = "Controls",
+    `Same loc (Q bins)`             = "No",
+    `Same loc (Q bins) + Controls`  = "Yes"
+  )
+)
 
 # Non-parametric identification: fixed dry-day bins of treatment -----------------------------
 
-# 1) Bins of raw childhood_total_dry_days
+# 1) Bins of raw childhood_total_dry_days (4 bins)
+
 model_data <- model_data %>%
   mutate(
     treat_t = case_when(
-      childhood_total_dry_days <= 100 ~ 1L,                           # Low exposure
-      childhood_total_dry_days > 100 & childhood_total_dry_days < 107 ~ 2L,  # Medium
-      childhood_total_dry_days >= 107 ~ 3L,                            # High
+      childhood_total_dry_days < 96 ~ 1L,                                 # Bin 1: lowest exposure
+      childhood_total_dry_days >= 96 & childhood_total_dry_days < 102 ~ 2L, # Bin 2
+      childhood_total_dry_days >= 102 & childhood_total_dry_days < 108 ~ 3L,# Bin 3
+      childhood_total_dry_days >= 106 ~ 4L,                                 # Bin 4: highest exposure
       TRUE ~ NA_integer_
     )
   )
@@ -4014,7 +4432,7 @@ lpm_fe_t_controls_cat <- feols(
   CATHOLIC ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
+    survey_year + log_pop_birth  | BIRTH + prov_nac,
   data    = model_data,
   cluster = ~ prov_nac
 )
@@ -4030,7 +4448,7 @@ lpm_fe_t_controls_rel <- feols(
   RELIGIOUS_PRACTICE ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
+    survey_year + log_pop_birth  | BIRTH + prov_nac,
   data    = model_data,
   cluster = ~ prov_nac
 )
@@ -4052,7 +4470,7 @@ lpm_fe_t_controls_cou <- feols(
 )
 
 # Joint tests (religious outcomes)
-# H0: treat_t::2 = treat_t::3 = 0
+# H0: treat_t::2 = treat_t::3 = treat_t::4 = 0
 wald_cat_t_ctrl <- wald(lpm_fe_t_controls_cat, keep = "treat_t::")
 wald_rel_t_ctrl <- wald(lpm_fe_t_controls_rel, keep = "treat_t::")
 wald_cou_t_ctrl <- wald(lpm_fe_t_controls_cou, keep = "treat_t::")
@@ -4070,14 +4488,15 @@ modelsummary(
     "Couple catholic (bins)"               = lpm_fe_t_nocontrols_cou,
     "Couple catholic (bins) + Controls"    = lpm_fe_t_controls_cou
   ),
-  title = "LPM with dry-day bins of childhood dry days (religious outcomes)",
+  title = "LPM with four dry-day bins of childhood dry days (religious outcomes)",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
   coef_rename = c(
-    "treat_t::2" = "Medium exp vs Low",
-    "treat_t::3" = "High exposure vs Low"
+    "treat_t::2" = "Bin 2 vs Bin 1",
+    "treat_t::3" = "Bin 3 vs Bin 1",
+    "treat_t::4" = "Bin 4 vs Bin 1"
   ),
   add_rows = tibble(
     term = "Controls",
@@ -4093,7 +4512,6 @@ modelsummary(
 
 # Political outcomes: PARTICIPATION, CONSERVATIVE_VOTE, LEFT_RIGHT
 
-
 # PARTICIPATION
 lpm_fe_t_nocontrols_par <- feols(
   PARTICIPATION ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
@@ -4105,7 +4523,7 @@ lpm_fe_t_controls_par <- feols(
   PARTICIPATION ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~ prov_nac
 )
@@ -4121,7 +4539,7 @@ lpm_fe_t_controls_con <- feols(
   CONSERVATIVE_VOTE ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~ prov_nac
 )
@@ -4137,13 +4555,13 @@ lpm_fe_t_controls_lr <- feols(
   LEFT_RIGHT ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
+    survey_year  + log_pop_birth | BIRTH + prov_nac,
   data = model_data,
   cluster = ~ prov_nac
 )
 
 # Joint tests (political outcomes)
-# H0: treat_t::2 = treat_t::3 = 0
+# H0: treat_t::2 = treat_t::3 = treat_t::4 = 0
 wald_par_t_ctrl <- wald(lpm_fe_t_controls_par, keep = "treat_t::")
 wald_con_t_ctrl <- wald(lpm_fe_t_controls_con, keep = "treat_t::")
 wald_lr_t_ctrl  <- wald(lpm_fe_t_controls_lr,  keep = "treat_t::")
@@ -4161,14 +4579,15 @@ modelsummary(
     "Left-right (bins)"                = lpm_fe_t_nocontrols_lr,
     "Left-right (bins) + Controls"     = lpm_fe_t_controls_lr
   ),
-  title = "LPM with dry-day bins of childhood dry days (political outcomes)",
+  title = "LPM with four dry-day bins of childhood dry days (political outcomes)",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
   coef_rename = c(
-    "treat_t::2" = "Medium vs Low",
-    "treat_t::3" = "High vs Low"
+    "treat_t::2" = "Bin 2 vs Bin 1",
+    "treat_t::3" = "Bin 3 vs Bin 1",
+    "treat_t::4" = "Bin 4 vs Bin 1"
   ),
   add_rows = tibble(
     term = "Controls",
@@ -4201,7 +4620,8 @@ build_adrf_data <- function(models_list) {
     mutate(
       treat_level = case_when(
         term == "treat_t::2" ~ 2L,
-        term == "treat_t::3" ~ 3L
+        term == "treat_t::3" ~ 3L,
+        term == "treat_t::4" ~ 4L
       )
     ) %>%
     select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
@@ -4217,10 +4637,8 @@ build_adrf_data <- function(models_list) {
     mutate(
       exposure_level = factor(
         treat_level,
-        levels = 1:3,
-        labels = c("Low ",
-                   "Medium",
-                   "High")
+        levels = 1:4,
+        labels = c("Bin 1", "Bin 2", "Bin 3", "Bin 4")
       )
     )
 }
@@ -4253,7 +4671,7 @@ ggplot(coef_religious_t,
   labs(
     title = "Approximate Dose Response (Religious Outcomes)",
     x = "Childhood dry-day exposure",
-    y = "Estimated Effect (vs Low exposure)"
+    y = "Estimated Effect (vs Bin 1)"
   ) +
   theme_minimal()
 
@@ -4267,7 +4685,7 @@ ggplot(coef_political_t,
   labs(
     title = "Approximate Dose Response (Political Outcomes)",
     x = "Childhood dry-day exposure",
-    y = "Estimated Effect (vs Low exposure)"
+    y = "Estimated Effect (vs Bin 1)"
   ) +
   theme_minimal()
 
@@ -4285,7 +4703,7 @@ lpm_fe_t_controls_inc <- feols(
   INCOME ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
+    survey_year  + log_pop_birth | BIRTH + prov_nac,
   data    = model_data,
   cluster = ~ prov_nac
 )
@@ -4301,7 +4719,7 @@ lpm_fe_t_controls_edu <- feols(
   EDUCATION ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
+    survey_year + log_pop_birth | BIRTH + prov_nac,
   data    = model_data,
   cluster = ~ prov_nac
 )
@@ -4317,13 +4735,13 @@ lpm_fe_t_controls_trust <- feols(
   TRUST_PEOPLE ~ i(treat_t, ref = 1) + FEMALE +
     FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
     FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + 
-    survey_year | BIRTH + prov_nac,
+    survey_year  + log_pop_birth | BIRTH + prov_nac,
   data    = model_data,
   cluster = ~ prov_nac
 )
 
 # Joint tests (other outcomes)
-# H0: treat_t::2 = treat_t::3 = 0
+# H0: treat_t::2 = treat_t::3 = treat_t::4 = 0
 wald_inc_t_ctrl   <- wald(lpm_fe_t_controls_inc,   keep = "treat_t::")
 wald_edu_t_ctrl   <- wald(lpm_fe_t_controls_edu,   keep = "treat_t::")
 wald_trust_t_ctrl <- wald(lpm_fe_t_controls_trust, keep = "treat_t::")
@@ -4341,14 +4759,15 @@ modelsummary(
     "Trust people (bins)"            = lpm_fe_t_nocontrols_trust,
     "Trust people (bins) + Controls" = lpm_fe_t_controls_trust
   ),
-  title = "LPM with dry-day bins of childhood dry days (other outcomes)",
+  title = "LPM with four dry-day bins of childhood dry days (other outcomes)",
   output = "latex",
   stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
   coef_rename = c(
-    "treat_t::2" = "Medium vs Low",
-    "treat_t::3" = "High vs Low"
+    "treat_t::2" = "Bin 2 vs Bin 1",
+    "treat_t::3" = "Bin 3 vs Bin 1",
+    "treat_t::4" = "Bin 4 vs Bin 1"
   ),
   add_rows = tibble(
     term = "Controls",
@@ -4370,7 +4789,7 @@ other_models_t <- list(
   TrustPeople = lpm_fe_t_controls_trust
 )
 
-coef_other_t <- build_adrf_data(other_models_t)  # uses the helper defined earlier
+coef_other_t <- build_adrf_data(other_models_t)
 
 ggplot(coef_other_t,
        aes(x = exposure_level, y = estimate,
@@ -4381,23 +4800,26 @@ ggplot(coef_other_t,
   labs(
     title = "Approximate Dose Response (Other Outcomes)",
     x = "Childhood dry-day exposure",
-    y = "Estimated Effect (vs Low exposure)"
+    y = "Estimated Effect (vs Bin 1)"
   ) +
   theme_minimal()
 
 
-
-# Robustness: Conley (spatial) standard errors -----------------------------------------------------------------------
-
+# Robustness: Conley SEs --------------------------------------------------
 
 library(fixest)
 library(mapSpain)
 library(sf)
 library(dplyr)
 library(modelsummary)
+library(purrr)
+library(broom)
+library(tibble)
+library(ggplot2)
 
-# 1) Province centroids (true coordinates for distances)
-#    Use moveCAN = FALSE to keep actual positions of Canary Islands, etc.
+# ---------------------------------------------------------
+# 0) Province coordinates and Conley vcov
+# ---------------------------------------------------------
 provinces_conley <- esp_get_prov(moveCAN = FALSE)
 
 prov_coords_conley <- provinces_conley %>%
@@ -4412,1693 +4834,841 @@ prov_coords_conley <- provinces_conley %>%
     lat, long
   )
 
-# 2) Merge coordinates into the model_data used for quartile regressions
 model_data_conley <- model_data %>%
-  left_join(prov_coords_conley, by = "prov_nac")
-
-# quick sanity check
-model_data_conley %>%
-  summarise(
-    n              = n(),
-    n_missing_lat  = sum(is.na(lat)),
-    n_missing_long = sum(is.na(long))
+  left_join(prov_coords_conley, by = "prov_nac") %>%
+  mutate(
+    treat_q = ntile(childhood_total_dry_days_std, 4)
   )
 
+cutoff_km <- 100
+vcov_conley <- conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
 
-# Re-estimate main "+ controls" specs on model_data_conley
-# (point estimates will be the same as with IID SEs; only SEs change)
-
-
-#  Religious outcomes (+ controls) 
-lpm_fe_q_controls_cat_c <- feols(
-  CATHOLIC ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
+# ---------------------------------------------------------
+# 1) Helpers
+# ---------------------------------------------------------
+controls_rhs <- c(
+  "FEMALE",
+  "FATHER_BORN_SPAIN", "MOTHER_BORN_SPAIN",
+  "FATHER_EMPLOYMENT", "MOTHER_EMPLOYMENT",
+  "survey_year", "log_pop_birth"
 )
 
-lpm_fe_q_controls_rel_c <- feols(
-  RELIGIOUS_PRACTICE ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
+fe_rhs <- c("BIRTH", "prov_nac")
+
+fit_lq_models <- function(y, data, treat = "childhood_total_dry_days_std") {
+  treat_sq <- paste0(treat, "_sq")
+  
+  f_lin <- as.formula(
+    paste0(
+      y, " ~ ", treat, " + ",
+      paste(controls_rhs, collapse = " + "),
+      " | ", paste(fe_rhs, collapse = " + ")
+    )
+  )
+  
+  f_quad <- as.formula(
+    paste0(
+      y, " ~ ", treat, " + ", treat_sq, " + ",
+      paste(controls_rhs, collapse = " + "),
+      " | ", paste(fe_rhs, collapse = " + ")
+    )
+  )
+  
+  list(
+    linear = feols(f_lin, data = data),
+    quad   = feols(f_quad, data = data),
+    f_lin  = f_lin,
+    f_quad = f_quad
+  )
+}
+
+fit_q_models <- function(y, data) {
+  f_noc <- as.formula(
+    paste0(
+      y, " ~ i(treat_q, ref = 1) + survey_year | ",
+      paste(fe_rhs, collapse = " + ")
+    )
+  )
+  
+  f_con <- as.formula(
+    paste0(
+      y, " ~ i(treat_q, ref = 1) + ",
+      paste(controls_rhs, collapse = " + "),
+      " | ", paste(fe_rhs, collapse = " + ")
+    )
+  )
+  
+  list(
+    noc  = feols(f_noc, data = data),
+    con  = feols(f_con, data = data),
+    f_noc = f_noc,
+    f_con = f_con
+  )
+}
+
+get_wald_p_print_vcov <- function(mod, keep_pattern, vcov_spec) {
+  out <- capture.output(fixest::wald(mod, keep = keep_pattern, vcov = vcov_spec))
+  p_line <- grep("p-value =", out, value = TRUE)
+  round(as.numeric(sub(".*p-value = ([0-9.]+).*", "\\1", p_line[1])), 3)
+}
+
+extract_binned_effects_vcov <- function(models, var_prefix, label_map, vcov_spec) {
+  map_dfr(names(models), function(nm) {
+    mod <- models[[nm]]
+    ct  <- coeftable(mod, vcov = vcov_spec)
+    ci  <- confint(mod, vcov = vcov_spec)
+    
+    terms <- rownames(ct)[grepl(paste0("^", var_prefix, "::"), rownames(ct))]
+    
+    tibble(
+      Outcome  = nm,
+      term     = terms,
+      estimate = unname(coef(mod)[terms]),
+      conf.low = ci[terms, 1],
+      conf.high = ci[terms, 2]
+    )
+  }) %>%
+    mutate(
+      treat_level = as.integer(sub(paste0(var_prefix, "::"), "", term)),
+      bin_label   = recode(term, !!!label_map)
+    )
+}
+
+# ---------------------------------------------------------
+# 2) Outcomes
+# ---------------------------------------------------------
+outcomes_relig <- c("CATHOLIC", "RELIGIOUS_PRACTICE", "COUPLE_CATHOLIC")
+outcomes_pol   <- c("PARTICIPATION", "CONSERVATIVE_VOTE", "LEFT_RIGHT")
+outcomes_other <- c("INCOME", "EDUCATION", "TRUST_PEOPLE")
+
+# ---------------------------------------------------------
+# 3) LINEAR / QUADRATIC TABLES (same style as main section)
+# ---------------------------------------------------------
+
+# Religious
+mods_lq_relig_c <- lapply(outcomes_relig, fit_lq_models, data = model_data_conley)
+names(mods_lq_relig_c) <- outcomes_relig
+
+models_religion_conley <- list(
+  "Catholic: Linear"              = mods_lq_relig_c$CATHOLIC$linear,
+  "Catholic: Quadratic"           = mods_lq_relig_c$CATHOLIC$quad,
+  "Religious practice: Linear"    = mods_lq_relig_c$RELIGIOUS_PRACTICE$linear,
+  "Religious practice: Quadratic" = mods_lq_relig_c$RELIGIOUS_PRACTICE$quad,
+  "Couple catholic: Linear"       = mods_lq_relig_c$COUPLE_CATHOLIC$linear,
+  "Couple catholic: Quadratic"    = mods_lq_relig_c$COUPLE_CATHOLIC$quad
 )
 
-lpm_fe_q_controls_cou_c <- feols(
-  COUPLE_CATHOLIC ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
+add_rows_religion_conley <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Catholic: Linear"              = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_relig_c$CATHOLIC$f_lin)),  "Linear"),
+  "Catholic: Quadratic"           = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_relig_c$CATHOLIC$f_quad)), "Quadratic"),
+  "Religious practice: Linear"    = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_relig_c$RELIGIOUS_PRACTICE$f_lin)),  "Linear"),
+  "Religious practice: Quadratic" = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_relig_c$RELIGIOUS_PRACTICE$f_quad)), "Quadratic"),
+  "Couple catholic: Linear"       = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_relig_c$COUPLE_CATHOLIC$f_lin)),  "Linear"),
+  "Couple catholic: Quadratic"    = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_relig_c$COUPLE_CATHOLIC$f_quad)), "Quadratic")
 )
-
-# Political outcomes (+ controls) 
-lpm_fe_q_controls_par_c <- feols(
-  PARTICIPATION ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_q_controls_con_c <- feols(
-  CONSERVATIVE_VOTE ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_q_controls_lr_c <- feols(
-  LEFT_RIGHT ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-
-# Conley spatial SEs (e.g. 200km cutoff, spherical distance)
-
-
-cutoff_km <- 200  # you can also try 100, 300, etc. as robustness
-
-sum_cat_conley <- summary(
-  lpm_fe_q_controls_cat_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_rel_conley <- summary(
-  lpm_fe_q_controls_rel_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_cou_conley <- summary(
-  lpm_fe_q_controls_cou_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_par_conley <- summary(
-  lpm_fe_q_controls_par_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_con_conley <- summary(
-  lpm_fe_q_controls_con_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_lr_conley <- summary(
-  lpm_fe_q_controls_lr_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-# (Optional) check how much SEs change for one coefficient
-se(lpm_fe_q_controls_cat)          # clustered by prov_nac (your baseline)
-se(sum_cat_conley)                 # Conley SEs
-
-
-# LaTeX tables with Conley SEs
 
 modelsummary(
-  list(
-    "Catholic (Q bins) + Controls, Conley SE"           = sum_cat_conley,
-    "Religious practice (Q bins) + Controls, Conley SE" = sum_rel_conley,
-    "Couple catholic (Q bins) + Controls, Conley SE"    = sum_cou_conley
-  ),
-  title = paste0(
-    "LPM with quartile dummies of standardized childhood dry days ",
-    "(religious outcomes), Conley spatial SEs (cutoff = ", cutoff_km, " km)"
-  ),
-  output    = "latex",
-  stars     = c("*" = .1, "**" = .05, "***" = .01),
+  models_religion_conley,
+  vcov = vcov_conley,
+  title = paste0("Religious outcomes: linear and quadratic treatment specifications, Conley SEs (cutoff = ", cutoff_km, " km)"),
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
   coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
+    "childhood_total_dry_days_std"    = "Dry days (std.)",
+    "childhood_total_dry_days_std_sq" = "Dry days squared"
   ),
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Catholic (Q bins) + Controls, Conley SE`           = "Yes",
-    `Religious practice (Q bins) + Controls, Conley SE` = "Yes",
-    `Couple catholic (Q bins) + Controls, Conley SE`    = "Yes"
-  )
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  add_rows = add_rows_religion_conley
 )
 
+# Political
+mods_lq_pol_c <- lapply(outcomes_pol, fit_lq_models, data = model_data_conley)
+names(mods_lq_pol_c) <- outcomes_pol
+
+models_politics_conley <- list(
+  "Participation: Linear"    = mods_lq_pol_c$PARTICIPATION$linear,
+  "Participation: Quadratic" = mods_lq_pol_c$PARTICIPATION$quad,
+  "Conservative: Linear"     = mods_lq_pol_c$CONSERVATIVE_VOTE$linear,
+  "Conservative: Quadratic"  = mods_lq_pol_c$CONSERVATIVE_VOTE$quad,
+  "Left-right: Linear"       = mods_lq_pol_c$LEFT_RIGHT$linear,
+  "Left-right: Quadratic"    = mods_lq_pol_c$LEFT_RIGHT$quad
+)
+
+add_rows_politics_conley <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Participation: Linear"    = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_pol_c$PARTICIPATION$f_lin)),  "Linear"),
+  "Participation: Quadratic" = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_pol_c$PARTICIPATION$f_quad)), "Quadratic"),
+  "Conservative: Linear"     = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_pol_c$CONSERVATIVE_VOTE$f_lin)),  "Linear"),
+  "Conservative: Quadratic"  = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_pol_c$CONSERVATIVE_VOTE$f_quad)), "Quadratic"),
+  "Left-right: Linear"       = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_pol_c$LEFT_RIGHT$f_lin)),  "Linear"),
+  "Left-right: Quadratic"    = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_pol_c$LEFT_RIGHT$f_quad)), "Quadratic")
+)
 
 modelsummary(
-  list(
-    "Participation (Q bins) + Controls, Conley SE" = sum_par_conley,
-    "Conservative (Q bins) + Controls, Conley SE"  = sum_con_conley,
-    "Left-right (Q bins) + Controls, Conley SE"    = sum_lr_conley
-  ),
-  title = paste0(
-    "LPM with quartile dummies of standardized childhood dry days ",
-    "(political outcomes), Conley spatial SEs (cutoff = ", cutoff_km, " km)"
-  ),
-  output    = "latex",
-  stars     = c("*" = .1, "**" = .05, "***" = .01),
+  models_politics_conley,
+  vcov = vcov_conley,
+  title = paste0("Political outcomes: linear and quadratic treatment specifications, Conley SEs (cutoff = ", cutoff_km, " km)"),
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
   coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
+    "childhood_total_dry_days_std"    = "Dry days (std.)",
+    "childhood_total_dry_days_std_sq" = "Dry days squared"
   ),
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Participation (Q bins) + Controls, Conley SE` = "Yes",
-    `Conservative (Q bins) + Controls, Conley SE`  = "Yes",
-    `Left-right (Q bins) + Controls, Conley SE`    = "Yes"
-  )
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  add_rows = add_rows_politics_conley
 )
 
-model_data %>%
-  group_by(treat_q) %>%
-  summarise(
-    n_total      = n(),
-    n_missing_Y  = sum(is.na(CONSERVATIVE_VOTE)),
-    share_missing_Y = mean(is.na(CONSERVATIVE_VOTE))
-  )
+# Other
+mods_lq_other_c <- lapply(outcomes_other, fit_lq_models, data = model_data_conley)
+names(mods_lq_other_c) <- outcomes_other
 
-
-
-# Religious outcomes (+ controls, tertiles)
-
-lpm_fe_t_controls_cat_c <- feols(
-  CATHOLIC ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
+models_other_conley <- list(
+  "Education: Linear"           = mods_lq_other_c$EDUCATION$linear,
+  "Education: Quadratic"        = mods_lq_other_c$EDUCATION$quad,
+  "Household income: Linear"    = mods_lq_other_c$INCOME$linear,
+  "Household income: Quadratic" = mods_lq_other_c$INCOME$quad,
+  "Trust people: Linear"        = mods_lq_other_c$TRUST_PEOPLE$linear,
+  "Trust people: Quadratic"     = mods_lq_other_c$TRUST_PEOPLE$quad
 )
 
-lpm_fe_t_controls_rel_c <- feols(
-  RELIGIOUS_PRACTICE ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
+add_rows_other_conley <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Education: Linear"           = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_other_c$EDUCATION$f_lin)),  "Linear"),
+  "Education: Quadratic"        = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_other_c$EDUCATION$f_quad)), "Quadratic"),
+  "Household income: Linear"    = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_other_c$INCOME$f_lin)),  "Linear"),
+  "Household income: Quadratic" = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_other_c$INCOME$f_quad)), "Quadratic"),
+  "Trust people: Linear"        = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_other_c$TRUST_PEOPLE$f_lin)),  "Linear"),
+  "Trust people: Quadratic"     = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_lq_other_c$TRUST_PEOPLE$f_quad)), "Quadratic")
 )
-
-lpm_fe_t_controls_cou_c <- feols(
-  COUPLE_CATHOLIC ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-# Political outcomes (+ controls, tertiles)
-
-lpm_fe_t_controls_par_c <- feols(
-  PARTICIPATION ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_t_controls_con_c <- feols(
-  CONSERVATIVE_VOTE ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_t_controls_lr_c <- feols(
-  LEFT_RIGHT ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-
-# Conley spatial SEs for tertile models
-
-sum_cat_t_conley <- summary(
-  lpm_fe_t_controls_cat_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_rel_t_conley <- summary(
-  lpm_fe_t_controls_rel_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_cou_t_conley <- summary(
-  lpm_fe_t_controls_cou_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_par_t_conley <- summary(
-  lpm_fe_t_controls_par_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_con_t_conley <- summary(
-  lpm_fe_t_controls_con_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_lr_t_conley <- summary(
-  lpm_fe_t_controls_lr_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-# (optional sanity check)
-se(lpm_fe_t_controls_cat)      # clustered by prov_nac (baseline)
-se(sum_cat_t_conley)          # Conley SEs (tertile version)
 
 modelsummary(
-  list(
-    "Catholic (T bins) + Controls, Conley SE"           = sum_cat_t_conley,
-    "Religious practice (T bins) + Controls, Conley SE" = sum_rel_t_conley,
-    "Couple catholic (T bins) + Controls, Conley SE"    = sum_cou_t_conley
-  ),
-  title = paste0(
-    "LPM with tertile dummies of standardized childhood dry days ",
-    "(religious outcomes), Conley spatial SEs (cutoff = ", cutoff_km, " km)"
-  ),
-  output    = "latex",
-  stars     = c("*" = .1, "**" = .05, "***" = .01),
+  models_other_conley,
+  vcov = vcov_conley,
+  title = paste0("Other outcomes: linear and quadratic treatment specifications, Conley SEs (cutoff = ", cutoff_km, " km)"),
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
   coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
+    "childhood_total_dry_days_std"    = "Dry days (std.)",
+    "childhood_total_dry_days_std_sq" = "Dry days squared"
   ),
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Catholic (T bins) + Controls, Conley SE`           = "Yes",
-    `Religious practice (T bins) + Controls, Conley SE` = "Yes",
-    `Couple catholic (T bins) + Controls, Conley SE`    = "Yes"
-  )
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  add_rows = add_rows_other_conley
+)
+
+# ---------------------------------------------------------
+# 4) QUARTILE TABLES (same style as quartile section)
+# ---------------------------------------------------------
+
+# Religious
+mods_q_relig_c <- lapply(outcomes_relig, fit_q_models, data = model_data_conley)
+names(mods_q_relig_c) <- outcomes_relig
+
+add_rows_q_religion_conley <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Catholic (Q bins)"                      = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_relig_c$CATHOLIC$f_noc)), "No",
+                                               sprintf("%.3f", get_wald_p_print_vcov(mods_q_relig_c$CATHOLIC$con, "treat_q::", vcov_conley))),
+  "Catholic (Q bins) + Controls"           = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_relig_c$CATHOLIC$f_con)), "Yes",
+                                               sprintf("%.3f", get_wald_p_print_vcov(mods_q_relig_c$CATHOLIC$con, "treat_q::", vcov_conley))),
+  "Religious practice (Q bins)"            = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_relig_c$RELIGIOUS_PRACTICE$f_noc)), "No",
+                                               sprintf("%.3f", get_wald_p_print_vcov(mods_q_relig_c$RELIGIOUS_PRACTICE$con, "treat_q::", vcov_conley))),
+  "Religious practice (Q bins) + Controls" = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_relig_c$RELIGIOUS_PRACTICE$f_con)), "Yes",
+                                               sprintf("%.3f", get_wald_p_print_vcov(mods_q_relig_c$RELIGIOUS_PRACTICE$con, "treat_q::", vcov_conley))),
+  "Catholic partner (Q bins)"              = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_relig_c$COUPLE_CATHOLIC$f_noc)), "No",
+                                               sprintf("%.3f", get_wald_p_print_vcov(mods_q_relig_c$COUPLE_CATHOLIC$con, "treat_q::", vcov_conley))),
+  "Catholic partner (Q bins) + Controls"   = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_relig_c$COUPLE_CATHOLIC$f_con)), "Yes",
+                                              sprintf("%.3f", get_wald_p_print_vcov(mods_q_relig_c$COUPLE_CATHOLIC$con, "treat_q::", vcov_conley)))
 )
 
 modelsummary(
   list(
-    "Participation (T bins) + Controls, Conley SE" = sum_par_t_conley,
-    "Conservative (T bins) + Controls, Conley SE"  = sum_con_t_conley,
-    "Left-right (T bins) + Controls, Conley SE"    = sum_lr_t_conley
+    "Catholic (Q bins)"                      = mods_q_relig_c$CATHOLIC$noc,
+    "Catholic (Q bins) + Controls"           = mods_q_relig_c$CATHOLIC$con,
+    "Religious practice (Q bins)"            = mods_q_relig_c$RELIGIOUS_PRACTICE$noc,
+    "Religious practice (Q bins) + Controls" = mods_q_relig_c$RELIGIOUS_PRACTICE$con,
+    "Catholic partner (Q bins)"              = mods_q_relig_c$COUPLE_CATHOLIC$noc,
+    "Catholic partner (Q bins) + Controls"   = mods_q_relig_c$COUPLE_CATHOLIC$con
   ),
-  title = paste0(
-    "LPM with tertile dummies of standardized childhood dry days ",
-    "(political outcomes), Conley spatial SEs (cutoff = ", cutoff_km, " km)"
-  ),
-  output    = "latex",
-  stars     = c("*" = .1, "**" = .05, "***" = .01),
+  vcov = vcov_conley,
+  title = paste0("LPM with quartile dummies of standardized childhood dry days (religious outcomes), Conley SEs (cutoff = ", cutoff_km, " km)"),
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Participation (T bins) + Controls, Conley SE` = "Yes",
-    `Conservative (T bins) + Controls, Conley SE`  = "Yes",
-    `Left-right (T bins) + Controls, Conley SE`    = "Yes"
-  )
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  coef_rename = q_labels,
+  add_rows = add_rows_q_religion_conley
 )
 
+# Political
+mods_q_pol_c <- lapply(outcomes_pol, fit_q_models, data = model_data_conley)
+names(mods_q_pol_c) <- outcomes_pol
 
-# OTHER outcomes (+ controls) with Conley spatial SEs
-
-
-# Quartiles (+ controls)
-
-
-lpm_fe_q_controls_inc_c <- feols(
-  INCOME ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_q_controls_edu_c <- feols(
-  EDUCATION ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_q_controls_trust_c <- feols(
-  TRUST_PEOPLE ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-sum_inc_conley <- summary(
-  lpm_fe_q_controls_inc_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_edu_conley <- summary(
-  lpm_fe_q_controls_edu_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_trust_conley <- summary(
-  lpm_fe_q_controls_trust_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
+add_rows_q_politics_conley <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Participation (Q bins)"             = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_pol_c$PARTICIPATION$f_noc)), "No",
+                                           sprintf("%.3f", get_wald_p_print_vcov(mods_q_pol_c$PARTICIPATION$con, "treat_q::", vcov_conley))),
+  "Participation (Q bins) + Controls"  = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_pol_c$PARTICIPATION$f_con)), "Yes",
+                                           sprintf("%.3f", get_wald_p_print_vcov(mods_q_pol_c$PARTICIPATION$con, "treat_q::", vcov_conley))),
+  "Conservative (Q bins)"              = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_pol_c$CONSERVATIVE_VOTE$f_noc)), "No",
+                                           sprintf("%.3f", get_wald_p_print_vcov(mods_q_pol_c$CONSERVATIVE_VOTE$con, "treat_q::", vcov_conley))),
+  "Conservative (Q bins) + Controls"   = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_pol_c$CONSERVATIVE_VOTE$f_con)), "Yes",
+                                           sprintf("%.3f", get_wald_p_print_vcov(mods_q_pol_c$CONSERVATIVE_VOTE$con, "treat_q::", vcov_conley))),
+  "Left-right (Q bins)"                = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_pol_c$LEFT_RIGHT$f_noc)), "No",
+                                           sprintf("%.3f", get_wald_p_print_vcov(mods_q_pol_c$LEFT_RIGHT$con, "treat_q::", vcov_conley))),
+  "Left-right (Q bins) + Controls"     = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_pol_c$LEFT_RIGHT$f_con)), "Yes",
+                                           sprintf("%.3f", get_wald_p_print_vcov(mods_q_pol_c$LEFT_RIGHT$con, "treat_q::", vcov_conley)))
 )
 
 modelsummary(
   list(
-    "Income (Q bins) + Controls, Conley SE"       = sum_inc_conley,
-    "Education (Q bins) + Controls, Conley SE"    = sum_edu_conley,
-    "Trust people (Q bins) + Controls, Conley SE" = sum_trust_conley
+    "Participation (Q bins)"             = mods_q_pol_c$PARTICIPATION$noc,
+    "Participation (Q bins) + Controls"  = mods_q_pol_c$PARTICIPATION$con,
+    "Conservative (Q bins)"              = mods_q_pol_c$CONSERVATIVE_VOTE$noc,
+    "Conservative (Q bins) + Controls"   = mods_q_pol_c$CONSERVATIVE_VOTE$con,
+    "Left-right (Q bins)"                = mods_q_pol_c$LEFT_RIGHT$noc,
+    "Left-right (Q bins) + Controls"     = mods_q_pol_c$LEFT_RIGHT$con
   ),
-  title = paste0(
-    "LPM with quartile dummies of standardized childhood dry days ",
-    "(other outcomes), Conley spatial SEs (cutoff = ", cutoff_km, " km)"
-  ),
-  output    = "latex",
-  stars     = c("*" = .1, "**" = .05, "***" = .01),
+  vcov = vcov_conley,
+  title = paste0("LPM with quartile dummies of standardized childhood dry days (political outcomes), Conley SEs (cutoff = ", cutoff_km, " km)"),
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
-  ),
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Income (Q bins) + Controls, Conley SE`       = "Yes",
-    `Education (Q bins) + Controls, Conley SE`    = "Yes",
-    `Trust people (Q bins) + Controls, Conley SE` = "Yes"
-  )
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  coef_rename = q_labels,
+  add_rows = add_rows_q_politics_conley
 )
 
+# Other
+mods_q_other_c <- lapply(outcomes_other, fit_q_models, data = model_data_conley)
+names(mods_q_other_c) <- outcomes_other
 
-
-# Tertiles (+ controls)
-
-
-lpm_fe_t_controls_inc_c <- feols(
-  INCOME ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_t_controls_edu_c <- feols(
-  EDUCATION ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-lpm_fe_t_controls_trust_c <- feols(
-  TRUST_PEOPLE ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data_conley
-)
-
-sum_inc_t_conley <- summary(
-  lpm_fe_t_controls_inc_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_edu_t_conley <- summary(
-  lpm_fe_t_controls_edu_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
-)
-
-sum_trust_t_conley <- summary(
-  lpm_fe_t_controls_trust_c,
-  vcov = conley(cutoff = cutoff_km, distance = "spherical") ~ lat + long
+add_rows_q_other_conley <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Income (Q bins)"                  = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_other_c$INCOME$f_noc)), "No",
+                                         sprintf("%.3f", get_wald_p_print_vcov(mods_q_other_c$INCOME$con, "treat_q::", vcov_conley))),
+  "Income (Q bins) + Controls"       = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_other_c$INCOME$f_con)), "Yes",
+                                         sprintf("%.3f", get_wald_p_print_vcov(mods_q_other_c$INCOME$con, "treat_q::", vcov_conley))),
+  "Education (Q bins)"               = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_other_c$EDUCATION$f_noc)), "No",
+                                         sprintf("%.3f", get_wald_p_print_vcov(mods_q_other_c$EDUCATION$con, "treat_q::", vcov_conley))),
+  "Education (Q bins) + Controls"    = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_other_c$EDUCATION$f_con)), "Yes",
+                                         sprintf("%.3f", get_wald_p_print_vcov(mods_q_other_c$EDUCATION$con, "treat_q::", vcov_conley))),
+  "Trust people (Q bins)"            = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_other_c$TRUST_PEOPLE$f_noc)), "No",
+                                         sprintf("%.3f", get_wald_p_print_vcov(mods_q_other_c$TRUST_PEOPLE$con, "treat_q::", vcov_conley))),
+  "Trust people (Q bins) + Controls" = c(sprintf("%.3f", dv_mean_from_data(model_data_conley, mods_q_other_c$TRUST_PEOPLE$f_con)), "Yes",
+                                         sprintf("%.3f", get_wald_p_print_vcov(mods_q_other_c$TRUST_PEOPLE$con, "treat_q::", vcov_conley)))
 )
 
 modelsummary(
   list(
-    "Income (T bins) + Controls, Conley SE"       = sum_inc_t_conley,
-    "Education (T bins) + Controls, Conley SE"    = sum_edu_t_conley,
-    "Trust people (T bins) + Controls, Conley SE" = sum_trust_t_conley
+    "Income (Q bins)"                  = mods_q_other_c$INCOME$noc,
+    "Income (Q bins) + Controls"       = mods_q_other_c$INCOME$con,
+    "Education (Q bins)"               = mods_q_other_c$EDUCATION$noc,
+    "Education (Q bins) + Controls"    = mods_q_other_c$EDUCATION$con,
+    "Trust people (Q bins)"            = mods_q_other_c$TRUST_PEOPLE$noc,
+    "Trust people (Q bins) + Controls" = mods_q_other_c$TRUST_PEOPLE$con
   ),
-  title = paste0(
-    "LPM with tertile dummies of standardized childhood dry days ",
-    "(other outcomes), Conley spatial SEs (cutoff = ", cutoff_km, " km)"
-  ),
-  output    = "latex",
-  stars     = c("*" = .1, "**" = .05, "***" = .01),
+  vcov = vcov_conley,
+  title = paste0("LPM with quartile dummies of standardized childhood dry days (other outcomes), Conley SEs (cutoff = ", cutoff_km, " km)"),
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
-  add_rows = tibble::tibble(
-    term = "Controls",
-    `Income (T bins) + Controls, Conley SE`       = "Yes",
-    `Education (T bins) + Controls, Conley SE`    = "Yes",
-    `Trust people (T bins) + Controls, Conley SE` = "Yes"
-  )
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  coef_rename = q_labels,
+  add_rows = add_rows_q_other_conley
 )
+
+# ---------------------------------------------------------
+# 5) ADRF PLOTS (same style as quartile section)
+# ---------------------------------------------------------
+coef_religious_q_conley <- extract_binned_effects_vcov(
+  models = list(
+    Catholic           = mods_q_relig_c$CATHOLIC$con,
+    ReligiousPractice  = mods_q_relig_c$RELIGIOUS_PRACTICE$con,
+    CoupleCatholic     = mods_q_relig_c$COUPLE_CATHOLIC$con
+  ),
+  var_prefix = "treat_q",
+  label_map = q_labels,
+  vcov_spec = vcov_conley
+) %>%
+  mutate(
+    Outcome = recode(Outcome, !!!pretty_outcomes),
+    Outcome = factor(Outcome, levels = c("Catholic", "Religious practice", "Catholic partner"))
+  )
+
+coef_political_q_conley <- extract_binned_effects_vcov(
+  models = list(
+    Participation = mods_q_pol_c$PARTICIPATION$con,
+    Conservative  = mods_q_pol_c$CONSERVATIVE_VOTE$con,
+    LeftRight     = mods_q_pol_c$LEFT_RIGHT$con
+  ),
+  var_prefix = "treat_q",
+  label_map = q_labels,
+  vcov_spec = vcov_conley
+) %>%
+  mutate(
+    Outcome = recode(Outcome, !!!pretty_outcomes),
+    Outcome = factor(Outcome, levels = c("Participation", "Conservative vote", "Left-right scale"))
+  )
+
+coef_other_q_conley <- extract_binned_effects_vcov(
+  models = list(
+    Income      = mods_q_other_c$INCOME$con,
+    Education   = mods_q_other_c$EDUCATION$con,
+    TrustPeople = mods_q_other_c$TRUST_PEOPLE$con
+  ),
+  var_prefix = "treat_q",
+  label_map = q_labels,
+  vcov_spec = vcov_conley
+) %>%
+  mutate(
+    Outcome = recode(Outcome, !!!pretty_outcomes)
+  )
+
+p_adrf_q_rel_conley <- plot_adrf(
+  df = build_adrf_data(coef_religious_q_conley),
+  nbins = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab = "Effect relative to Q1"
+)
+
+p_adrf_q_pol_conley <- plot_adrf(
+  df = build_adrf_data(coef_political_q_conley),
+  nbins = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab = "Effect relative to Q1"
+)
+
+p_adrf_q_other_conley <- plot_adrf(
+  df = build_adrf_data(coef_other_q_conley),
+  nbins = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab = "Effect relative to Q1"
+)
+
+if (!dir.exists("figures")) dir.create("figures")
+
+save_latex_plot(p_adrf_q_rel_conley,   "adrf_quartiles_religious_conley")
+save_latex_plot(p_adrf_q_pol_conley,   "adrf_quartiles_political_conley")
+save_latex_plot(p_adrf_q_other_conley, "adrf_quartiles_other_conley")
 
 
 # Placebo: Years 0 to 4 ---------------------------------------------------
 
-
-# Load the data
-survey <- read_csv("survey_with_childhood_weather_harmonized.csv")
-
-
-# Prepare model data
-model_data <- survey %>%
-  filter(BORN_SPAIN == 1,
-         !is.na(dry_days_0_4)) %>%
-  mutate(
-    year = BIRTH,
-    birth_prov_cluster = interaction(BIRTH, prov_nac)
-  ) %>%
-  dplyr::select(CATHOLIC, dry_days_0_4, survey_year, FEMALE, age, BIRTH, prov_nac,
-                FATHER_BORN_SPAIN, FATHER_SCHOOL, FATHER_EDUCATION,
-                FATHER_EMPLOYMENT, FATHER_EMPLOYMENT_TYPE, FATHER_CATHOLIC,
-                MOTHER_BORN_SPAIN, MOTHER_SCHOOL, MOTHER_EDUCATION,
-                MOTHER_EMPLOYMENT, MOTHER_CATHOLIC, birth_prov_cluster, COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE, PUBLIC_SECTOR_EMP, MERITOCRACY_BELIEF, SUBJECTIVE_CLASS, FAR_RIGHT_VOTE, CONSERVATIVE_VOTE, TRUST_PEOPLE, RELIGIOUS_PRACTICE, PARTICIPATION, INCOME, EDUCATION)
-
-
-# Non-parametric identification: quartile dummies of treatment -----------------------------------------------------------------------
-
-model_data <- model_data %>%
-  mutate(
-    treat_q = factor(ntile(dry_days_0_4, 4), levels = 1:4),
-    treat_t = factor(ntile(dry_days_0_4, 3), levels = 1:3)
-  )
-
-# 1) Quartiles of standardized treatment (overall distribution)
-model_data <- model_data %>%
-  mutate(
-    treat_q = ntile(dry_days_0_4, 4)  # 1 = lowest exposure, 4 = highest
-  )
-
-table(model_data$treat_q, useNA = "ifany")  # quick sanity check
-
-
-# Religious outcomes: CATHOLIC, RELIGIOUS_PRACTICE, COUPLE_CATHOLIC
-
-# CATHOLIC
-lpm_fe_q_nocontrols_cat <- feols(
-  CATHOLIC ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_cat <- feols(
-  CATHOLIC ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-# RELIGIOUS PRACTICE
-lpm_fe_q_nocontrols_rel <- feols(
-  RELIGIOUS_PRACTICE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_rel <- feols(
-  RELIGIOUS_PRACTICE ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-# COUPLE CATHOLIC
-lpm_fe_q_nocontrols_cou <- feols(
-  COUPLE_CATHOLIC ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_cou <- feols(
-  COUPLE_CATHOLIC ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-
-# Joint tests (religious outcomes)
-# H0: all quartile dummies = 0  (Q2 = Q3 = Q4 = 0)
-
-
-wald_cat_ctrl <- wald(lpm_fe_q_controls_cat, keep = "treat_q::")
-wald_rel_ctrl <- wald(lpm_fe_q_controls_rel, keep = "treat_q::")
-wald_cou_ctrl <- wald(lpm_fe_q_controls_cou, keep = "treat_q::")
-
-wald_cat_ctrl
-wald_rel_ctrl
-wald_cou_ctrl
-
-
-modelsummary(
-  list(
-    "Catholic "                        = lpm_fe_q_nocontrols_cat,
-    "Catholic (Q bins) + Controls"             = lpm_fe_q_controls_cat,
-    "Religious practice (Q bins)"              = lpm_fe_q_nocontrols_rel,
-    "Religious practice (Q bins) + Controls"   = lpm_fe_q_controls_rel,
-    "Couple catholic (Q bins)"                 = lpm_fe_q_nocontrols_cou,
-    "Couple catholic (Q bins) + Controls"      = lpm_fe_q_controls_cou
-  ),
-  title = "LPM with quartile dummies of standardized childhood dry days (religious outcomes)",
-  output = "latex",
-  stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Catholic (Q bins)`                      = "No",
-    `Catholic (Q bins) + Controls`           = "Yes",
-    `Religious practice (Q bins)`            = "No",
-    `Religious practice (Q bins) + Controls` = "Yes",
-    `Couple catholic (Q bins)`               = "No",
-    `Couple catholic (Q bins) + Controls`    = "Yes"
-  )
-)
-
-
-# Political outcomes: PARTICIPATION, CONSERVATIVE_VOTE, LEFT_RIGHT
-
-# PARTICIPATION
-lpm_fe_q_nocontrols_par <- feols(
-  PARTICIPATION ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_par <- feols(
-  PARTICIPATION ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-# CONSERVATIVE VOTE
-lpm_fe_q_nocontrols_con <- feols(
-  CONSERVATIVE_VOTE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_con <- feols(
-  CONSERVATIVE_VOTE ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-# LEFT-RIGHT SCALE
-lpm_fe_q_nocontrols_lr <- feols(
-  LEFT_RIGHT ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_lr <- feols(
-  LEFT_RIGHT ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-
-# Joint tests (political outcomes)
-# H0: all quartile dummies = 0
-
-
-wald_par_ctrl <- wald(lpm_fe_q_controls_par, keep = "treat_q::")
-wald_con_ctrl <- wald(lpm_fe_q_controls_con, keep = "treat_q::")
-wald_lr_ctrl  <- wald(lpm_fe_q_controls_lr,  keep = "treat_q::")
-
-wald_par_ctrl
-wald_con_ctrl
-wald_lr_ctrl
-
-modelsummary(
-  list(
-    "Participation (Q bins)"                  = lpm_fe_q_nocontrols_par,
-    "Participation (Q bins) + Controls"       = lpm_fe_q_controls_par,
-    "Conservative (Q bins)"                   = lpm_fe_q_nocontrols_con,
-    "Conservative (Q bins) + Controls"        = lpm_fe_q_controls_con,
-    "Left-right (Q bins)"                     = lpm_fe_q_nocontrols_lr,
-    "Left-right (Q bins) + Controls"          = lpm_fe_q_controls_lr
-  ),
-  title = "LPM with quartile dummies of standardized childhood dry days (political outcomes)",
-  output = "latex",
-  stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Participation (Q bins)`             = "No",
-    `Participation (Q bins) + Controls`  = "Yes",
-    `Conservative (Q bins)`              = "No",
-    `Conservative (Q bins) + Controls`   = "Yes",
-    `Left-right (Q bins)`                = "No",
-    `Left-right (Q bins) + Controls`     = "Yes"
-  )
-)
-
-
-
-library(broom)
-library(dplyr)
-library(ggplot2)
-library(purrr)
-
-
-# Religious outcomes: extract estimates
-
-religious_models_q <- list(
-  Catholic           = lpm_fe_q_controls_cat,
-  ReligiousPractice  = lpm_fe_q_controls_rel,
-  CoupleCatholic     = lpm_fe_q_controls_cou
-)
-
-coef_religious_q <- map_dfr(
-  religious_models_q,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_q::", term)) %>%
-  mutate(
-    Quartile = recode(term,
-                      "treat_q::2" = "Q2 vs Q1",
-                      "treat_q::3" = "Q3 vs Q1",
-                      "treat_q::4" = "Q4 vs Q1")
-  )
-
-
-# Political outcomes: extract estimates
-
-political_models_q <- list(
-  Participation = lpm_fe_q_controls_par,
-  Conservative  = lpm_fe_q_controls_con,
-  LeftRight     = lpm_fe_q_controls_lr
-)
-
-coef_political_q <- map_dfr(
-  political_models_q,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_q::", term)) %>%
-  mutate(
-    Quartile = recode(term,
-                      "treat_q::2" = "Q2 vs Q1",
-                      "treat_q::3" = "Q3 vs Q1",
-                      "treat_q::4" = "Q4 vs Q1")
-  )
-
-
-# Plot: Religious Outcomes (Quartile Dummies)
-
-ggplot(coef_religious_q, aes(x = Quartile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Dry Days Quartiles on Religious Outcomes",
-    y = "Coefficient (95% CI)", x = NULL
-  ) +
-  theme_minimal()
-
-
-# Plot: Political Outcomes (Quartile Dummies)
-
-ggplot(coef_political_q, aes(x = Quartile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Dry Days Quartiles on Political Outcomes",
-    y = "Coefficient (95% CI)", x = NULL
-  ) +
-  theme_minimal()
-
-# Prepare ADRF-style data for religious outcomes
-adrf_data_religious <- coef_religious_q %>%
-  mutate(
-    treat_level = case_when(
-      Quartile == "Q2 vs Q1" ~ 2,
-      Quartile == "Q3 vs Q1" ~ 3,
-      Quartile == "Q4 vs Q1" ~ 4
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(coef_religious_q$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-# Plot ADRF approximation
-ggplot(adrf_data_religious, aes(x = treat_level, y = estimate)) +
-  geom_line(aes(group = Outcome), linetype = "solid") +
-  geom_point() +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  scale_x_continuous(breaks = 1:4, labels = paste("Q", 1:4, sep = "")) +
-  labs(
-    title = "Approximate Dose Response Function (Religious Outcomes)",
-    x = "Treatment Quartile",
-    y = "Estimated Effect (vs Q1)"
-  ) +
-  theme_minimal()
-
-
-adrf_data_political <- coef_political_q %>%
-  mutate(
-    treat_level = case_when(
-      Quartile == "Q2 vs Q1" ~ 2,
-      Quartile == "Q3 vs Q1" ~ 3,
-      Quartile == "Q4 vs Q1" ~ 4
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(coef_political_q$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-# Plot
-ggplot(adrf_data_political, aes(x = treat_level, y = estimate)) +
-  geom_line(aes(group = Outcome), linetype = "solid") +
-  geom_point() +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  scale_x_continuous(breaks = 1:4, labels = paste("Q", 1:4, sep = "")) +
-  labs(
-    title = "Approximate Dose Response Function (Political Outcomes)",
-    x = "Treatment Quartile",
-    y = "Estimated Effect (vs Q1)"
-  ) +
-  theme_minimal()
-
-
-
-
-
-# 2) OTHER outcomes regressions 
-
-# INCOME
-lpm_fe_q_nocontrols_inc <- feols(
-  INCOME ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-lpm_fe_q_controls_inc <- feols(
-  INCOME ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-# EDUCATION
-lpm_fe_q_nocontrols_edu <- feols(
-  EDUCATION ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-lpm_fe_q_controls_edu <- feols(
-  EDUCATION ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-# TRUST IN PEOPLE
-lpm_fe_q_nocontrols_trust <- feols(
-  TRUST_PEOPLE ~ i(treat_q, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-lpm_fe_q_controls_trust <- feols(
-  TRUST_PEOPLE ~ i(treat_q, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-
-# 3) Joint tests (OTHER outcomes): H0: Q2 = Q3 = Q4 = 0 
-
-wald_inc_q_ctrl   <- wald(lpm_fe_q_controls_inc,   keep = "treat_q::")
-wald_edu_q_ctrl   <- wald(lpm_fe_q_controls_edu,   keep = "treat_q::")
-wald_trust_q_ctrl <- wald(lpm_fe_q_controls_trust, keep = "treat_q::")
-
-wald_inc_q_ctrl
-wald_edu_q_ctrl
-wald_trust_q_ctrl
-
-
-# 4) Table (OTHER outcomes) 
-
-modelsummary(
-  list(
-    "Income (Q bins)"                  = lpm_fe_q_nocontrols_inc,
-    "Income (Q bins) + Controls"       = lpm_fe_q_controls_inc,
-    "Education (Q bins)"               = lpm_fe_q_nocontrols_edu,
-    "Education (Q bins) + Controls"    = lpm_fe_q_controls_edu,
-    "Trust people (Q bins)"            = lpm_fe_q_nocontrols_trust,
-    "Trust people (Q bins) + Controls" = lpm_fe_q_controls_trust
-  ),
-  title = "LPM with quartile dummies of standardized childhood dry days (other outcomes)",
-  output = "latex",
-  stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_q::2" = "Q2 vs Q1",
-    "treat_q::3" = "Q3 vs Q1",
-    "treat_q::4" = "Q4 vs Q1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Income (Q bins)`                  = "No",
-    `Income (Q bins) + Controls`       = "Yes",
-    `Education (Q bins)`               = "No",
-    `Education (Q bins) + Controls`    = "Yes",
-    `Trust people (Q bins)`            = "No",
-    `Trust people (Q bins) + Controls` = "Yes"
-  )
-)
-
-
-# 5) Plot: coefficients + 95% CI (OTHER outcomes) 
-
-library(broom)
-library(dplyr)
-library(ggplot2)
-library(purrr)
-
-other_models_q <- list(
-  Income      = lpm_fe_q_controls_inc,
-  Education   = lpm_fe_q_controls_edu,
-  TrustPeople = lpm_fe_q_controls_trust
-)
-
-coef_other_q <- map_dfr(
-  other_models_q,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_q::", term)) %>%
-  mutate(
-    Quartile = recode(term,
-                      "treat_q::2" = "Q2 vs Q1",
-                      "treat_q::3" = "Q3 vs Q1",
-                      "treat_q::4" = "Q4 vs Q1")
-  )
-
-ggplot(coef_other_q, aes(x = Quartile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Dry Days Quartiles on Other Outcomes",
-    y = "Coefficient (95% CI)", x = NULL
-  ) +
-  theme_minimal()
-
-
-# ADRF-style plot (OTHER outcomes) 
-
-adrf_data_other <- coef_other_q %>%
-  mutate(
-    treat_level = case_when(
-      Quartile == "Q2 vs Q1" ~ 2,
-      Quartile == "Q3 vs Q1" ~ 3,
-      Quartile == "Q4 vs Q1" ~ 4
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome     = unique(coef_other_q$Outcome),
-      treat_level = 1,
-      estimate    = 0,
-      conf.low    = 0,
-      conf.high   = 0
-    )
-  )
-
-ggplot(adrf_data_other, aes(x = treat_level, y = estimate)) +
-  geom_line(aes(group = Outcome)) +
-  geom_point() +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  scale_x_continuous(breaks = 1:4, labels = paste0("Q", 1:4)) +
-  labs(
-    title = "Approximate Dose Response Function (Other Outcomes)",
-    x = "Treatment Quartile",
-    y = "Estimated Effect (vs Q1)"
-  ) +
-  theme_minimal()
-
-
-
-
-# Non-parametric identification: tertile dummies of treatment -----------------------------
-
-# 1) Tertiles of standardized treatment (overall distribution)
-model_data <- model_data %>%
-  mutate(
-    treat_t = ntile(dry_days_0_4, 3)  # 1 = low, 2 = mid, 3 = high exposure
-  )
-
-table(model_data$treat_t, useNA = "ifany")  # sanity check
-
-# Religious outcomes: CATHOLIC, RELIGIOUS_PRACTICE, COUPLE_CATHOLIC
-
-# CATHOLIC
-lpm_fe_t_nocontrols_cat <- feols(
-  CATHOLIC ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_t_controls_cat <- feols(
-  CATHOLIC ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-# RELIGIOUS PRACTICE
-lpm_fe_t_nocontrols_rel <- feols(
-  RELIGIOUS_PRACTICE ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_t_controls_rel <- feols(
-  RELIGIOUS_PRACTICE ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-# COUPLE CATHOLIC
-lpm_fe_t_nocontrols_cou <- feols(
-  COUPLE_CATHOLIC ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-lpm_fe_t_controls_cou <- feols(
-  COUPLE_CATHOLIC ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~prov_nac
-)
-
-# Joint tests (religious outcomes)
-# H0: treat_t::2 = treat_t::3 = 0
-wald_cat_t_ctrl <- wald(lpm_fe_t_controls_cat, keep = "treat_t::")
-wald_rel_t_ctrl <- wald(lpm_fe_t_controls_rel, keep = "treat_t::")
-wald_cou_t_ctrl <- wald(lpm_fe_t_controls_cou, keep = "treat_t::")
-
-wald_cat_t_ctrl
-wald_rel_t_ctrl
-wald_cou_t_ctrl
-
-modelsummary(
-  list(
-    "Catholic (T bins)"                        = lpm_fe_t_nocontrols_cat,
-    "Catholic (T bins) + Controls"             = lpm_fe_t_controls_cat,
-    "Religious practice (T bins)"              = lpm_fe_t_nocontrols_rel,
-    "Religious practice (T bins) + Controls"   = lpm_fe_t_controls_rel,
-    "Couple catholic (T bins)"                 = lpm_fe_t_nocontrols_cou,
-    "Couple catholic (T bins) + Controls"      = lpm_fe_t_controls_cou
-  ),
-  title = "LPM with tertile dummies of standardized childhood dry days (religious outcomes)",
-  output = "latex",
-  stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Catholic (T bins)`                      = "No",
-    `Catholic (T bins) + Controls`           = "Yes",
-    `Religious practice (T bins)`            = "No",
-    `Religious practice (T bins) + Controls` = "Yes",
-    `Couple catholic (T bins)`               = "No",
-    `Couple catholic (T bins) + Controls`    = "Yes"
-  )
-)
-
-# Political outcomes: PARTICIPATION, CONSERVATIVE_VOTE, LEFT_RIGHT
-
-
-# PARTICIPATION
-lpm_fe_t_nocontrols_par <- feols(
-  PARTICIPATION ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-lpm_fe_t_controls_par <- feols(
-  PARTICIPATION ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-# CONSERVATIVE VOTE
-lpm_fe_t_nocontrols_con <- feols(
-  CONSERVATIVE_VOTE ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-lpm_fe_t_controls_con <- feols(
-  CONSERVATIVE_VOTE ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-# LEFT-RIGHT SCALE
-lpm_fe_t_nocontrols_lr <- feols(
-  LEFT_RIGHT ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-lpm_fe_t_controls_lr <- feols(
-  LEFT_RIGHT ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data = model_data,
-  cluster = ~prov_nac
-)
-
-
-# Joint tests (political outcomes)
-# H0: treat_t::2 = treat_t::3 = 0
-wald_par_t_ctrl <- wald(lpm_fe_t_controls_par, keep = "treat_t::")
-wald_con_t_ctrl <- wald(lpm_fe_t_controls_con, keep = "treat_t::")
-wald_lr_t_ctrl <- wald(lpm_fe_t_controls_lr, keep = "treat_t::")
-
-
-wald_par_t_ctrl
-wald_con_t_ctrl
-wald_lr_t_ctrl
-
-
-modelsummary(
-  list(
-    "Participation (T bins)" = lpm_fe_t_nocontrols_par,
-    "Participation (T bins) + Controls" = lpm_fe_t_controls_par,
-    "Conservative (T bins)" = lpm_fe_t_nocontrols_con,
-    "Conservative (T bins) + Controls" = lpm_fe_t_controls_con,
-    "Left-right (T bins)" = lpm_fe_t_nocontrols_lr,
-    "Left-right (T bins) + Controls" = lpm_fe_t_controls_lr
-  ),
-  title = "LPM with tertile dummies of standardized childhood dry days (political outcomes)",
-  output = "latex",
-  stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Participation (T bins)` = "No",
-    `Participation (T bins) + Controls` = "Yes",
-    `Conservative (T bins)` = "No",
-    `Conservative (T bins) + Controls` = "Yes",
-    `Left-right (T bins)` = "No",
-    `Left-right (T bins) + Controls` = "Yes"
-  )
-)
-
-
-
-# Extract coefficients and CIs
-religious_models <- list(
-  Catholic           = lpm_fe_t_controls_cat,
-  ReligiousPractice  = lpm_fe_t_controls_rel,
-  CoupleCatholic     = lpm_fe_t_controls_cou
-)
-
-coef_df <- purrr::map_dfr(
-  religious_models,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1")
-  )
-
-# Plot
-ggplot(coef_df, aes(x = Tertile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Childhood Dry Days (Tertile Dummies)",
-    x = NULL,
-    y = "Coefficient Estimate (95% CI)"
-  ) +
-  theme_minimal()
-
-political_models <- list(
-  Participation = lpm_fe_t_controls_par,
-  Conservative  = lpm_fe_t_controls_con,
-  LeftRight     = lpm_fe_t_controls_lr
-)
-
-coef_df <- purrr::map_dfr(
-  political_models,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1")
-  )
-
-
-# Plot
-ggplot(coef_df, aes(x = Tertile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Childhood Dry Days (Tertile Dummies)",
-    x = NULL,
-    y = "Coefficient Estimate (95% CI)"
-  ) +
-  theme_minimal()
-
-
-# Step 1: Extract coefficients from religious models (with controls)
-
-religious_models_t <- list(
-  Catholic           = lpm_fe_t_controls_cat,
-  ReligiousPractice  = lpm_fe_t_controls_rel,
-  CoupleCatholic     = lpm_fe_t_controls_cou
-)
-
-coef_religious_t <- map_dfr(
-  religious_models_t,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1"),
-    treat_level = case_when(
-      Tertile == "T2 vs T1" ~ 2,
-      Tertile == "T3 vs T1" ~ 3
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(.$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-
-# Step 2: Repeat for political models
-
-political_models_t <- list(
-  Participation = lpm_fe_t_controls_par,
-  Conservative  = lpm_fe_t_controls_con,
-  LeftRight     = lpm_fe_t_controls_lr
-)
-
-coef_political_t <- map_dfr(
-  political_models_t,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1"),
-    treat_level = case_when(
-      Tertile == "T2 vs T1" ~ 2,
-      Tertile == "T3 vs T1" ~ 3
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome = unique(.$Outcome),
-      treat_level = 1,
-      estimate = 0,
-      conf.low = 0,
-      conf.high = 0
-    )
-  )
-
-
-# Step 3: Plot ADRF-style graphs
-
-
-# Religious Outcomes ADRF Plot
-ggplot(coef_religious_t, aes(x = treat_level, y = estimate)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-  geom_line(aes(group = Outcome)) +
-  geom_point() +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  scale_x_continuous(breaks = 1:3, labels = paste0("T", 1:3)) +
-  labs(
-    title = "Approximate Dose Response Function (Religious Outcomes)",
-    x = "Treatment Tertile",
-    y = "Estimated Effect (vs T1)"
-  ) +
-  theme_minimal()
-
-# Political Outcomes ADRF Plot
-ggplot(coef_political_t, aes(x = treat_level, y = estimate)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-  geom_line(aes(group = Outcome)) +
-  geom_point() +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  scale_x_continuous(breaks = 1:3, labels = paste0("T", 1:3)) +
-  labs(
-    title = "Approximate Dose Response Function (Political Outcomes)",
-    x = "Treatment Tertile",
-    y = "Estimated Effect (vs T1)"
-  ) +
-  theme_minimal()
-
-
-# 1) OTHER outcomes regressions 
-
-# INCOME
-lpm_fe_t_nocontrols_inc <- feols(
-  INCOME ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-lpm_fe_t_controls_inc <- feols(
-  INCOME ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-# EDUCATION
-lpm_fe_t_nocontrols_edu <- feols(
-  EDUCATION ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-lpm_fe_t_controls_edu <- feols(
-  EDUCATION ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-# TRUST IN PEOPLE
-lpm_fe_t_nocontrols_trust <- feols(
-  TRUST_PEOPLE ~ i(treat_t, ref = 1) + survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-lpm_fe_t_controls_trust <- feols(
-  TRUST_PEOPLE ~ i(treat_t, ref = 1) + FEMALE +
-    FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT  +
-    survey_year | BIRTH + prov_nac,
-  data    = model_data,
-  cluster = ~ prov_nac
-)
-
-
-# 2) Joint tests (OTHER outcomes): H0: T2 = T3 = 0 
-
-wald_inc_t_ctrl   <- wald(lpm_fe_t_controls_inc,   keep = "treat_t::")
-wald_edu_t_ctrl   <- wald(lpm_fe_t_controls_edu,   keep = "treat_t::")
-wald_trust_t_ctrl <- wald(lpm_fe_t_controls_trust, keep = "treat_t::")
-
-wald_inc_t_ctrl
-wald_edu_t_ctrl
-wald_trust_t_ctrl
-
-
-# 3) Table (OTHER outcomes) 
-
-modelsummary(
-  list(
-    "Income (T bins)"                  = lpm_fe_t_nocontrols_inc,
-    "Income (T bins) + Controls"       = lpm_fe_t_controls_inc,
-    "Education (T bins)"               = lpm_fe_t_nocontrols_edu,
-    "Education (T bins) + Controls"    = lpm_fe_t_controls_edu,
-    "Trust people (T bins)"            = lpm_fe_t_nocontrols_trust,
-    "Trust people (T bins) + Controls" = lpm_fe_t_controls_trust
-  ),
-  title = "LPM with tertile dummies of standardized childhood dry days (other outcomes)",
-  output = "latex",
-  stars = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
-  coef_rename = c(
-    "treat_t::2" = "T2 vs T1",
-    "treat_t::3" = "T3 vs T1"
-  ),
-  add_rows = tibble(
-    term = "Controls",
-    `Income (T bins)`                  = "No",
-    `Income (T bins) + Controls`       = "Yes",
-    `Education (T bins)`               = "No",
-    `Education (T bins) + Controls`    = "Yes",
-    `Trust people (T bins)`            = "No",
-    `Trust people (T bins) + Controls` = "Yes"
-  )
-)
-
-
-# 4) Plot: coefficients + 95% CI (OTHER outcomes) 
-
-library(broom)
-library(dplyr)
-library(ggplot2)
-library(purrr)
-
-other_models_t <- list(
-  Income      = lpm_fe_t_controls_inc,
-  Education   = lpm_fe_t_controls_edu,
-  TrustPeople = lpm_fe_t_controls_trust
-)
-
-coef_other_t <- map_dfr(
-  other_models_t,
-  ~ tidy(.x, conf.int = TRUE),
-  .id = "Outcome"
-) %>%
-  filter(grepl("^treat_t::", term)) %>%
-  mutate(
-    Tertile = recode(term,
-                     "treat_t::2" = "T2 vs T1",
-                     "treat_t::3" = "T3 vs T1")
-  )
-
-ggplot(coef_other_t, aes(x = Tertile, y = estimate, ymin = conf.low, ymax = conf.high)) +
-  geom_pointrange() +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Effect of Childhood Dry Days (Tertile Dummies) on Other Outcomes",
-    x = NULL,
-    y = "Coefficient Estimate (95% CI)"
-  ) +
-  theme_minimal()
-
-
-# 5) Optional: ADRF-style plot (OTHER outcomes) 
-
-adrf_data_other_t <- coef_other_t %>%
-  mutate(
-    treat_level = case_when(
-      Tertile == "T2 vs T1" ~ 2,
-      Tertile == "T3 vs T1" ~ 3
-    )
-  ) %>%
-  select(Outcome, treat_level, estimate, conf.low, conf.high) %>%
-  bind_rows(
-    tibble(
-      Outcome     = unique(coef_other_t$Outcome),
-      treat_level = 1,
-      estimate    = 0,
-      conf.low    = 0,
-      conf.high   = 0
-    )
-  )
-
-ggplot(adrf_data_other_t, aes(x = treat_level, y = estimate)) +
-  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
-  geom_line(aes(group = Outcome)) +
-  geom_point() +
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
-  facet_wrap(~ Outcome, scales = "free_y") +
-  scale_x_continuous(breaks = 1:3, labels = paste0("T", 1:3)) +
-  labs(
-    title = "Approximate Dose Response Function (Other Outcomes)",
-    x = "Treatment Tertile",
-    y = "Estimated Effect (vs T1)"
-  ) +
-  theme_minimal()
-
-
-# Quartile + Tertile coefficient plots (CONTROLS spec)
-# Works for raw bins (like your example) OR residualized bins
-
+library(readr)
 library(dplyr)
 library(fixest)
-library(broom)
-library(purrr)
+library(modelsummary)
+library(tidyr)
 library(ggplot2)
+library(purrr)
+library(broom)
+library(tibble)
 
-
-# 1) Choose treatment to bin (controls-residualized)
-
-treat_var <- "treat_resid_ctrl_std"
-
-# Use a clean sample for binning (avoid NA bins)
-model_bins <- model_data %>%
-  filter(!is.na(.data[[treat_var]])) %>%
+# ---------------------------------------------------------
+# 0) Build placebo estimation sample
+# ---------------------------------------------------------
+model_data_p04 <- survey %>%
+  filter(
+    BORN_SPAIN == 1,
+    !is.na(dry_days_0_4),
+    dry_days_0_4 != 0
+  ) %>%
   mutate(
-    treat_q = ntile(.data[[treat_var]], 4),   # 1..4
-    treat_t = ntile(.data[[treat_var]], 3)    # 1..3
+    year = BIRTH,
+    birth_prov_cluster = interaction(BIRTH, prov_nac),
+    log_pop_birth = log(pop_birth_last_census),
+    dry_days_0_4_std = (dry_days_0_4 - mean(dry_days_0_4, na.rm = TRUE)) /
+      sd(dry_days_0_4, na.rm = TRUE),
+    dry_days_0_4_std_sq = dry_days_0_4_std^2,
+    treat_q = ntile(dry_days_0_4_std, 4)
+  ) %>%
+  dplyr::select(
+    CATHOLIC, RELIGIOUS_PRACTICE, COUPLE_CATHOLIC,
+    PARTICIPATION, CONSERVATIVE_VOTE, LEFT_RIGHT,
+    INCOME, EDUCATION, TRUST_PEOPLE,
+    dry_days_0_4, dry_days_0_4_std, dry_days_0_4_std_sq, treat_q,
+    survey_year, FEMALE, BIRTH, prov_nac, log_pop_birth,
+    FATHER_BORN_SPAIN, MOTHER_BORN_SPAIN,
+    FATHER_EMPLOYMENT, MOTHER_EMPLOYMENT
   )
 
-table(model_bins$treat_q, useNA = "ifany")
-table(model_bins$treat_t, useNA = "ifany")
+# ---------------------------------------------------------
+# 1) Helpers
+# ---------------------------------------------------------
+controls_rhs_p04 <- c(
+  "FEMALE",
+  "FATHER_BORN_SPAIN", "MOTHER_BORN_SPAIN",
+  "FATHER_EMPLOYMENT", "MOTHER_EMPLOYMENT",
+  "survey_year", "log_pop_birth"
+)
 
-# 2) Controls + FE spec (match your example)
+fe_rhs_p04 <- c("BIRTH", "prov_nac")
 
-ctrl_terms <- "FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year"
-fe_terms   <- "BIRTH + prov_nac"
-
-fit_bins_controls <- function(data, y, binvar){
-  fml <- as.formula(paste0(y, " ~ i(", binvar, ", ref = 1) + ", ctrl_terms, " | ", fe_terms))
-  feols(fml, data = data, cluster = ~ prov_nac)
-}
-
-
-# 3) Run models + tidy results
-
-religious_outcomes <- c("CATHOLIC", "RELIGIOUS_PRACTICE", "COUPLE_CATHOLIC")
-political_outcomes <- c("PARTICIPATION", "CONSERVATIVE_VOTE", "LEFT_RIGHT")
-other_outcomes     <- c("INCOME", "EDUCATION", "TRUST_PEOPLE")
-
-run_tidy_bins <- function(data, outcomes, binvar, binprefix){
-  mods <- setNames(lapply(outcomes, function(y) fit_bins_controls(data, y, binvar)), outcomes)
-  
-  map_dfr(mods, ~ tidy(.x, conf.int = TRUE), .id = "Outcome") %>%
-    filter(grepl(paste0("^", binprefix, "::"), term)) %>%
-    mutate(
-      Level = case_when(
-        term == paste0(binprefix, "::2") ~ paste0(substr(binprefix, nchar(binprefix), nchar(binprefix)), "2 vs ", substr(binprefix, nchar(binprefix), nchar(binprefix)), "1"),
-        term == paste0(binprefix, "::3") ~ paste0(substr(binprefix, nchar(binprefix), nchar(binprefix)), "3 vs ", substr(binprefix, nchar(binprefix), nchar(binprefix)), "1"),
-        term == paste0(binprefix, "::4") ~ paste0(substr(binprefix, nchar(binprefix), nchar(binprefix)), "4 vs ", substr(binprefix, nchar(binprefix), nchar(binprefix)), "1"),
-        TRUE ~ term
-      ),
-      treat_level = as.integer(gsub(paste0(binprefix, "::"), "", term))
+fit_lq_models_p04 <- function(y, data) {
+  f_lin <- as.formula(
+    paste0(
+      y, " ~ dry_days_0_4_std + ",
+      paste(controls_rhs_p04, collapse = " + "),
+      " | ", paste(fe_rhs_p04, collapse = " + ")
     )
-}
-
-# Quartiles
-coef_religious_q <- run_tidy_bins(model_bins, religious_outcomes, "treat_q", "treat_q")
-coef_political_q <- run_tidy_bins(model_bins, political_outcomes, "treat_q", "treat_q")
-coef_other_q     <- run_tidy_bins(model_bins, other_outcomes,     "treat_q", "treat_q")
-
-# Tertiles
-coef_religious_t <- run_tidy_bins(model_bins, religious_outcomes, "treat_t", "treat_t")
-coef_political_t <- run_tidy_bins(model_bins, political_outcomes, "treat_t", "treat_t")
-coef_other_t     <- run_tidy_bins(model_bins, other_outcomes,     "treat_t", "treat_t")
-
-
-# 4) Coefficient plots (pointrange)
-
-plot_pointrange <- function(df, title){
-  ggplot(df, aes(x = Level, y = estimate, ymin = conf.low, ymax = conf.high)) +
-    geom_pointrange() +
-    facet_wrap(~ Outcome, scales = "free_y") +
-    geom_hline(yintercept = 0, linetype = "dashed") +
-    labs(title = title, x = NULL, y = "Coefficient (95% CI)") +
-    theme_minimal()
-}
-
-plot_pointrange(coef_religious_q,
-                paste0("Quartile dummies of ", treat_var, " (controls + FE): Religious outcomes"))
-plot_pointrange(coef_political_q,
-                paste0("Quartile dummies of ", treat_var, " (controls + FE): Political outcomes"))
-plot_pointrange(coef_other_q,
-                paste0("Quartile dummies of ", treat_var, " (controls + FE): Other outcomes"))
-
-plot_pointrange(coef_religious_t,
-                paste0("Tertile dummies of ", treat_var, " (controls + FE): Religious outcomes"))
-plot_pointrange(coef_political_t,
-                paste0("Tertile dummies of ", treat_var, " (controls + FE): Political outcomes"))
-plot_pointrange(coef_other_t,
-                paste0("Tertile dummies of ", treat_var, " (controls + FE): Other outcomes"))
-
-
-# 5) ADRF-style plots (include baseline bin at zero)
-
-make_adrf <- function(df, max_level){
-  df0 <- df %>% distinct(Outcome) %>%
-    mutate(treat_level = 1, estimate = 0, conf.low = 0, conf.high = 0)
+  )
   
-  out <- bind_rows(
-    df %>% select(Outcome, treat_level, estimate, conf.low, conf.high),
-    df0
-  ) %>% arrange(Outcome, treat_level)
+  f_quad <- as.formula(
+    paste0(
+      y, " ~ dry_days_0_4_std + dry_days_0_4_std_sq + ",
+      paste(controls_rhs_p04, collapse = " + "),
+      " | ", paste(fe_rhs_p04, collapse = " + ")
+    )
+  )
   
-  # keep only 1..max_level (safety)
-  out %>% filter(treat_level >= 1, treat_level <= max_level)
+  list(
+    linear = feols(f_lin, data = data, cluster = ~ prov_nac),
+    quad   = feols(f_quad, data = data, cluster = ~ prov_nac),
+    f_lin  = f_lin,
+    f_quad = f_quad
+  )
 }
 
-plot_adrf <- function(df_adrf, title, labels){
-  ggplot(df_adrf, aes(x = treat_level, y = estimate)) +
-    geom_line(aes(group = Outcome)) +
-    geom_point() +
-    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
-    facet_wrap(~ Outcome, scales = "free_y") +
-    geom_hline(yintercept = 0, linetype = "dashed") +
-    scale_x_continuous(breaks = seq_along(labels), labels = labels) +
-    labs(title = title, x = "Treatment bin", y = "Effect vs baseline bin") +
-    theme_minimal()
+fit_q_models_p04 <- function(y, data) {
+  f_noc <- as.formula(
+    paste0(
+      y, " ~ i(treat_q, ref = 1) + survey_year | ",
+      paste(fe_rhs_p04, collapse = " + ")
+    )
+  )
+  
+  f_con <- as.formula(
+    paste0(
+      y, " ~ i(treat_q, ref = 1) + ",
+      paste(controls_rhs_p04, collapse = " + "),
+      " | ", paste(fe_rhs_p04, collapse = " + ")
+    )
+  )
+  
+  list(
+    noc  = feols(f_noc, data = data, cluster = ~ prov_nac),
+    con  = feols(f_con, data = data, cluster = ~ prov_nac),
+    f_noc = f_noc,
+    f_con = f_con
+  )
 }
 
-adrf_religious_q <- make_adrf(coef_religious_q, 4)
-adrf_political_q <- make_adrf(coef_political_q, 4)
-adrf_other_q     <- make_adrf(coef_other_q, 4)
+# ---------------------------------------------------------
+# 2) Outcomes
+# ---------------------------------------------------------
+outcomes_relig <- c("CATHOLIC", "RELIGIOUS_PRACTICE", "COUPLE_CATHOLIC")
+outcomes_pol   <- c("PARTICIPATION", "CONSERVATIVE_VOTE", "LEFT_RIGHT")
+outcomes_other <- c("INCOME", "EDUCATION", "TRUST_PEOPLE")
 
-plot_adrf(adrf_religious_q,
-          paste0("Approx. dose-response (quartiles of ", treat_var, ", controls + FE): Religious"),
-          labels = paste0("Q", 1:4))
-plot_adrf(adrf_political_q,
-          paste0("Approx. dose-response (quartiles of ", treat_var, ", controls + FE): Political"),
-          labels = paste0("Q", 1:4))
-plot_adrf(adrf_other_q,
-          paste0("Approx. dose-response (quartiles of ", treat_var, ", controls + FE): Other"),
-          labels = paste0("Q", 1:4))
+# ---------------------------------------------------------
+# 3) LINEAR / QUADRATIC TABLES (same style as main section)
+# ---------------------------------------------------------
 
-adrf_religious_t <- make_adrf(coef_religious_t, 3)
-adrf_political_t <- make_adrf(coef_political_t, 3)
-adrf_other_t     <- make_adrf(coef_other_t, 3)
+# Religious
+mods_lq_relig_p04 <- lapply(outcomes_relig, fit_lq_models_p04, data = model_data_p04)
+names(mods_lq_relig_p04) <- outcomes_relig
 
-plot_adrf(adrf_religious_t,
-          paste0("Approx. dose-response (tertiles of ", treat_var, ", controls + FE): Religious"),
-          labels = paste0("T", 1:3))
-plot_adrf(adrf_political_t,
-          paste0("Approx. dose-response (tertiles of ", treat_var, ", controls + FE): Political"),
-          labels = paste0("T", 1:3))
-plot_adrf(adrf_other_t,
-          paste0("Approx. dose-response (tertiles of ", treat_var, ", controls + FE): Other"),
-          labels = paste0("T", 1:3))
+models_religion_p04 <- list(
+  "Catholic: Linear"              = mods_lq_relig_p04$CATHOLIC$linear,
+  "Catholic: Quadratic"           = mods_lq_relig_p04$CATHOLIC$quad,
+  "Religious practice: Linear"    = mods_lq_relig_p04$RELIGIOUS_PRACTICE$linear,
+  "Religious practice: Quadratic" = mods_lq_relig_p04$RELIGIOUS_PRACTICE$quad,
+  "Couple catholic: Linear"       = mods_lq_relig_p04$COUPLE_CATHOLIC$linear,
+  "Couple catholic: Quadratic"    = mods_lq_relig_p04$COUPLE_CATHOLIC$quad
+)
+
+add_rows_religion_p04 <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Catholic: Linear"              = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_relig_p04$CATHOLIC$f_lin)),  "Linear"),
+  "Catholic: Quadratic"           = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_relig_p04$CATHOLIC$f_quad)), "Quadratic"),
+  "Religious practice: Linear"    = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_relig_p04$RELIGIOUS_PRACTICE$f_lin)),  "Linear"),
+  "Religious practice: Quadratic" = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_relig_p04$RELIGIOUS_PRACTICE$f_quad)), "Quadratic"),
+  "Couple catholic: Linear"       = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_relig_p04$COUPLE_CATHOLIC$f_lin)),  "Linear"),
+  "Couple catholic: Quadratic"    = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_relig_p04$COUPLE_CATHOLIC$f_quad)), "Quadratic")
+)
+
+modelsummary(
+  models_religion_p04,
+  title = "Placebo 0–4: religious outcomes, linear and quadratic treatment specifications",
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  coef_rename = c(
+    "dry_days_0_4_std"    = "Dry days 0--4 (std.)",
+    "dry_days_0_4_std_sq" = "Dry days 0--4 squared"
+  ),
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  add_rows = add_rows_religion_p04
+)
+
+# Political
+mods_lq_pol_p04 <- lapply(outcomes_pol, fit_lq_models_p04, data = model_data_p04)
+names(mods_lq_pol_p04) <- outcomes_pol
+
+models_politics_p04 <- list(
+  "Participation: Linear"    = mods_lq_pol_p04$PARTICIPATION$linear,
+  "Participation: Quadratic" = mods_lq_pol_p04$PARTICIPATION$quad,
+  "Conservative: Linear"     = mods_lq_pol_p04$CONSERVATIVE_VOTE$linear,
+  "Conservative: Quadratic"  = mods_lq_pol_p04$CONSERVATIVE_VOTE$quad,
+  "Left-right: Linear"       = mods_lq_pol_p04$LEFT_RIGHT$linear,
+  "Left-right: Quadratic"    = mods_lq_pol_p04$LEFT_RIGHT$quad
+)
+
+add_rows_politics_p04 <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Participation: Linear"    = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_pol_p04$PARTICIPATION$f_lin)),  "Linear"),
+  "Participation: Quadratic" = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_pol_p04$PARTICIPATION$f_quad)), "Quadratic"),
+  "Conservative: Linear"     = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_pol_p04$CONSERVATIVE_VOTE$f_lin)),  "Linear"),
+  "Conservative: Quadratic"  = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_pol_p04$CONSERVATIVE_VOTE$f_quad)), "Quadratic"),
+  "Left-right: Linear"       = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_pol_p04$LEFT_RIGHT$f_lin)),  "Linear"),
+  "Left-right: Quadratic"    = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_pol_p04$LEFT_RIGHT$f_quad)), "Quadratic")
+)
+
+modelsummary(
+  models_politics_p04,
+  title = "Placebo 0–4: political outcomes, linear and quadratic treatment specifications",
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  coef_rename = c(
+    "dry_days_0_4_std"    = "Dry days 0--4 (std.)",
+    "dry_days_0_4_std_sq" = "Dry days 0--4 squared"
+  ),
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  add_rows = add_rows_politics_p04
+)
+
+# Other
+mods_lq_other_p04 <- lapply(outcomes_other, fit_lq_models_p04, data = model_data_p04)
+names(mods_lq_other_p04) <- outcomes_other
+
+models_other_p04 <- list(
+  "Education: Linear"           = mods_lq_other_p04$EDUCATION$linear,
+  "Education: Quadratic"        = mods_lq_other_p04$EDUCATION$quad,
+  "Household income: Linear"    = mods_lq_other_p04$INCOME$linear,
+  "Household income: Quadratic" = mods_lq_other_p04$INCOME$quad,
+  "Trust people: Linear"        = mods_lq_other_p04$TRUST_PEOPLE$linear,
+  "Trust people: Quadratic"     = mods_lq_other_p04$TRUST_PEOPLE$quad
+)
+
+add_rows_other_p04 <- data.frame(
+  term = c("Mean dep. var.", "Treatment form"),
+  check.names = FALSE,
+  "Education: Linear"           = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_other_p04$EDUCATION$f_lin)),  "Linear"),
+  "Education: Quadratic"        = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_other_p04$EDUCATION$f_quad)), "Quadratic"),
+  "Household income: Linear"    = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_other_p04$INCOME$f_lin)),  "Linear"),
+  "Household income: Quadratic" = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_other_p04$INCOME$f_quad)), "Quadratic"),
+  "Trust people: Linear"        = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_other_p04$TRUST_PEOPLE$f_lin)),  "Linear"),
+  "Trust people: Quadratic"     = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_lq_other_p04$TRUST_PEOPLE$f_quad)), "Quadratic")
+)
+
+modelsummary(
+  models_other_p04,
+  title = "Placebo 0–4: other outcomes, linear and quadratic treatment specifications",
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  coef_rename = c(
+    "dry_days_0_4_std"    = "Dry days 0--4 (std.)",
+    "dry_days_0_4_std_sq" = "Dry days 0--4 squared"
+  ),
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  add_rows = add_rows_other_p04
+)
+
+# ---------------------------------------------------------
+# 4) QUARTILE TABLES (same style as quartile section)
+# ---------------------------------------------------------
+
+mods_q_relig_p04 <- lapply(outcomes_relig, fit_q_models_p04, data = model_data_p04)
+names(mods_q_relig_p04) <- outcomes_relig
+
+add_rows_q_religion_p04 <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Catholic (Q bins)"                      = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_relig_p04$CATHOLIC$f_noc)), "No",
+                                               sprintf("%.3f", wald(mods_q_relig_p04$CATHOLIC$con, keep = "treat_q::")[["p"]])),
+  "Catholic (Q bins) + Controls"           = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_relig_p04$CATHOLIC$f_con)), "Yes",
+                                               sprintf("%.3f", wald(mods_q_relig_p04$CATHOLIC$con, keep = "treat_q::")[["p"]])),
+  "Religious practice (Q bins)"            = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_relig_p04$RELIGIOUS_PRACTICE$f_noc)), "No",
+                                               sprintf("%.3f", wald(mods_q_relig_p04$RELIGIOUS_PRACTICE$con, keep = "treat_q::")[["p"]])),
+  "Religious practice (Q bins) + Controls" = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_relig_p04$RELIGIOUS_PRACTICE$f_con)), "Yes",
+                                               sprintf("%.3f", wald(mods_q_relig_p04$RELIGIOUS_PRACTICE$con, keep = "treat_q::")[["p"]])),
+  "Catholic partner (Q bins)"              = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_relig_p04$COUPLE_CATHOLIC$f_noc)), "No",
+                                               sprintf("%.3f", wald(mods_q_relig_p04$COUPLE_CATHOLIC$con, keep = "treat_q::")[["p"]])),
+  "Catholic partner (Q bins) + Controls"   = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_relig_p04$COUPLE_CATHOLIC$f_con)), "Yes",
+                                               sprintf("%.3f", wald(mods_q_relig_p04$COUPLE_CATHOLIC$con, keep = "treat_q::")[["p"]])))
+
+
+modelsummary(
+  list(
+    "Catholic (Q bins)"                      = mods_q_relig_p04$CATHOLIC$noc,
+    "Catholic (Q bins) + Controls"           = mods_q_relig_p04$CATHOLIC$con,
+    "Religious practice (Q bins)"            = mods_q_relig_p04$RELIGIOUS_PRACTICE$noc,
+    "Religious practice (Q bins) + Controls" = mods_q_relig_p04$RELIGIOUS_PRACTICE$con,
+    "Catholic partner (Q bins)"              = mods_q_relig_p04$COUPLE_CATHOLIC$noc,
+    "Catholic partner (Q bins) + Controls"   = mods_q_relig_p04$COUPLE_CATHOLIC$con
+  ),
+  title = "Placebo 0–4: quartile dummies of standardized placebo treatment (religious outcomes)",
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  coef_rename = q_labels,
+  add_rows = add_rows_q_religion_p04
+)
+
+mods_q_pol_p04 <- lapply(outcomes_pol, fit_q_models_p04, data = model_data_p04)
+names(mods_q_pol_p04) <- outcomes_pol
+
+add_rows_q_politics_p04 <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Participation (Q bins)"             = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_pol_p04$PARTICIPATION$f_noc)), "No",
+                                           sprintf("%.3f", wald(mods_q_pol_p04$PARTICIPATION$con, keep = "treat_q::")[["p"]])),
+  "Participation (Q bins) + Controls"  = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_pol_p04$PARTICIPATION$f_con)), "Yes",
+                                           sprintf("%.3f", wald(mods_q_pol_p04$PARTICIPATION$con, keep = "treat_q::")[["p"]])),
+  "Conservative (Q bins)"              = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_pol_p04$CONSERVATIVE_VOTE$f_noc)), "No",
+                                           sprintf("%.3f", wald(mods_q_pol_p04$CONSERVATIVE_VOTE$con, keep = "treat_q::")[["p"]])),
+  "Conservative (Q bins) + Controls"   = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_pol_p04$CONSERVATIVE_VOTE$f_con)), "Yes",
+                                           sprintf("%.3f", wald(mods_q_pol_p04$CONSERVATIVE_VOTE$con, keep = "treat_q::")[["p"]])),
+  "Left-right (Q bins)"                = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_pol_p04$LEFT_RIGHT$f_noc)), "No",
+                                           sprintf("%.3f", wald(mods_q_pol_p04$LEFT_RIGHT$con, keep = "treat_q::")[["p"]])),
+  "Left-right (Q bins) + Controls"     = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_pol_p04$LEFT_RIGHT$f_con)), "Yes",
+                                           sprintf("%.3f", wald(mods_q_pol_p04$LEFT_RIGHT$con, keep = "treat_q::")[["p"]])))
+
+
+modelsummary(
+  list(
+    "Participation (Q bins)"             = mods_q_pol_p04$PARTICIPATION$noc,
+    "Participation (Q bins) + Controls"  = mods_q_pol_p04$PARTICIPATION$con,
+    "Conservative (Q bins)"              = mods_q_pol_p04$CONSERVATIVE_VOTE$noc,
+    "Conservative (Q bins) + Controls"   = mods_q_pol_p04$CONSERVATIVE_VOTE$con,
+    "Left-right (Q bins)"                = mods_q_pol_p04$LEFT_RIGHT$noc,
+    "Left-right (Q bins) + Controls"     = mods_q_pol_p04$LEFT_RIGHT$con
+  ),
+  title = "Placebo 0–4: quartile dummies of standardized placebo treatment (political outcomes)",
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  coef_rename = q_labels,
+  add_rows = add_rows_q_politics_p04
+)
+
+mods_q_other_p04 <- lapply(outcomes_other, fit_q_models_p04, data = model_data_p04)
+names(mods_q_other_p04) <- outcomes_other
+
+add_rows_q_other_p04 <- data.frame(
+  term = c("Mean dep. var.", "Controls", "Wald test p-value"),
+  check.names = FALSE,
+  "Income (Q bins)"                  = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_other_p04$INCOME$f_noc)), "No",
+                                         sprintf("%.3f", wald(mods_q_other_p04$INCOME$con, keep = "treat_q::")[["p"]])),
+  "Income (Q bins) + Controls"       = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_other_p04$INCOME$f_con)), "Yes",
+                                         sprintf("%.3f", wald(mods_q_other_p04$INCOME$con, keep = "treat_q::")[["p"]])),
+  "Education (Q bins)"               = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_other_p04$EDUCATION$f_noc)), "No",
+                                         sprintf("%.3f", wald(mods_q_other_p04$EDUCATION$con, keep = "treat_q::")[["p"]])),
+  "Education (Q bins) + Controls"    = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_other_p04$EDUCATION$f_con)), "Yes",
+                                         sprintf("%.3f", wald(mods_q_other_p04$EDUCATION$con, keep = "treat_q::")[["p"]])),
+  "Trust people (Q bins)"            = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_other_p04$TRUST_PEOPLE$f_noc)), "No",
+                                         sprintf("%.3f", wald(mods_q_other_p04$TRUST_PEOPLE$con, keep = "treat_q::")[["p"]])),
+  "Trust people (Q bins) + Controls" = c(sprintf("%.3f", dv_mean_from_data(model_data_p04, mods_q_other_p04$TRUST_PEOPLE$f_con)), "Yes",
+                                         sprintf("%.3f", wald(mods_q_other_p04$TRUST_PEOPLE$con, keep = "treat_q::")[["p"]])))
+
+
+modelsummary(
+  list(
+    "Income (Q bins)"                  = mods_q_other_p04$INCOME$noc,
+    "Income (Q bins) + Controls"       = mods_q_other_p04$INCOME$con,
+    "Education (Q bins)"               = mods_q_other_p04$EDUCATION$noc,
+    "Education (Q bins) + Controls"    = mods_q_other_p04$EDUCATION$con,
+    "Trust people (Q bins)"            = mods_q_other_p04$TRUST_PEOPLE$noc,
+    "Trust people (Q bins) + Controls" = mods_q_other_p04$TRUST_PEOPLE$con
+  ),
+  title = "Placebo 0–4: quartile dummies of standardized placebo treatment (other outcomes)",
+  output = "latex",
+  stars = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit = "AIC|BIC|R2 Within|R2 Within Adj.|RMSE|R2 Adj.",
+  coef_rename = q_labels,
+  add_rows = add_rows_q_other_p04
+)
+
+# ---------------------------------------------------------
+# 5) ADRF PLOTS (same style as quartile section)
+# ---------------------------------------------------------
+religious_models_q_p04 <- list(
+  Catholic           = mods_q_relig_p04$CATHOLIC$con,
+  ReligiousPractice  = mods_q_relig_p04$RELIGIOUS_PRACTICE$con,
+  CoupleCatholic     = mods_q_relig_p04$COUPLE_CATHOLIC$con
+)
+
+political_models_q_p04 <- list(
+  Participation = mods_q_pol_p04$PARTICIPATION$con,
+  Conservative  = mods_q_pol_p04$CONSERVATIVE_VOTE$con,
+  LeftRight     = mods_q_pol_p04$LEFT_RIGHT$con
+)
+
+other_models_q_p04 <- list(
+  Income      = mods_q_other_p04$INCOME$con,
+  Education   = mods_q_other_p04$EDUCATION$con,
+  TrustPeople = mods_q_other_p04$TRUST_PEOPLE$con
+)
+
+coef_religious_q_p04 <- extract_binned_effects(religious_models_q_p04, "treat_q", q_labels) %>%
+  mutate(
+    Outcome  = recode(Outcome, !!!pretty_outcomes),
+    Outcome  = factor(Outcome, levels = c("Catholic", "Religious practice", "Catholic partner"))
+  )
+
+coef_political_q_p04 <- extract_binned_effects(political_models_q_p04, "treat_q", q_labels) %>%
+  mutate(
+    Outcome  = recode(Outcome, !!!pretty_outcomes),
+    Outcome  = factor(Outcome, levels = c("Participation", "Conservative vote", "Left-right scale"))
+  )
+
+coef_other_q_p04 <- extract_binned_effects(other_models_q_p04, "treat_q", q_labels) %>%
+  mutate(
+    Outcome = recode(Outcome, !!!pretty_outcomes)
+  )
+
+p_adrf_q_rel_p04 <- plot_adrf(
+  df      = build_adrf_data(coef_religious_q_p04),
+  nbins   = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab    = "Effect relative to Q1"
+)
+
+p_adrf_q_pol_p04 <- plot_adrf(
+  df      = build_adrf_data(coef_political_q_p04),
+  nbins   = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab    = "Effect relative to Q1"
+)
+
+p_adrf_q_other_p04 <- plot_adrf(
+  df      = build_adrf_data(coef_other_q_p04),
+  nbins   = 4,
+  xlabels = paste0("Q", 1:4),
+  ylab    = "Effect relative to Q1"
+)
+
+if (!dir.exists("figures")) dir.create("figures")
+
+save_latex_plot(p_adrf_q_rel_p04,   "adrf_quartiles_religious_placebo_0_4")
+save_latex_plot(p_adrf_q_pol_p04,   "adrf_quartiles_political_placebo_0_4")
+save_latex_plot(p_adrf_q_other_p04, "adrf_quartiles_other_placebo_0_4")
 
 
 
@@ -7139,25 +6709,36 @@ for (y in all_outcomes) {
   )
 }
 
-
-# Heterogeneity: North vs South -------------------------------------------
-
+# Heterogeneity: North vs South (manual province split from selected map) ----
 
 library(dplyr)
 library(fixest)
 library(modelsummary)
 library(broom)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(tibble)
 
-# --- 1) Define South provinces (if not already defined) -----
+# =========================================================
+# 1) DEFINE SOUTH PROVINCES MANUALLY
+# =========================================================
+# Replace this vector with the prov_nac codes of the provinces you want to classify
+# as "South" according to your picture.
+#
+# Example of the old broader south definition:
+# Andalucía: 04, 11, 14, 18, 21, 23, 29, 41
+# Extremadura: 06, 10
+# Murcia: 30
+# south_prov_nac <- c(4, 11, 14, 18, 21, 23, 29, 41, 6, 10, 30)
 
-if (!exists("south_prov_nac")) {
-  # Andalucía: 04, 11, 14, 18, 21, 23, 29, 41
-  # Extremadura: 06, 10
-  # Murcia: 30
-  south_prov_nac <- c(4, 11, 14, 18, 21, 23, 29, 41, 6, 10, 30)
-}
+south_prov_nac <- c(
+  4, 6, 10, 11, 14, 18, 21, 23, 29, 30, 41
+)
 
-# --- 2) Pooled model data with North/South dummy -----------
+# =========================================================
+# 2) BUILD MODEL DATA WITH SOUTH DUMMY
+# =========================================================
 
 model_data_ns <- survey %>%
   filter(
@@ -7166,311 +6747,115 @@ model_data_ns <- survey %>%
     childhood_total_dry_days != 0
   ) %>%
   mutate(
-    south = as.integer(prov_nac %in% south_prov_nac),         # 1 = South, 0 = North
+    south = as.integer(prov_nac %in% south_prov_nac),
     year  = BIRTH,
     birth_prov_cluster = interaction(BIRTH, prov_nac),
-    # Standardize treatment in the full sample
     childhood_total_dry_days_std =
       (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
-      sd(childhood_total_dry_days,  na.rm = TRUE)
-  ) %>%
-  # Quartiles / tertiles of standardized treatment in the pooled sample
-  mutate(
-    treat_q = ntile(childhood_total_dry_days_std, 4),  # 1 = lowest, 4 = highest
-    treat_t = ntile(childhood_total_dry_days_std, 3)   # 1 = low, 3 = high
+      sd(childhood_total_dry_days, na.rm = TRUE),
+    treat_q = ntile(childhood_total_dry_days_std, 4),
+    log_pop_birth = log(pop_birth_last_census)
   )
 
-# Quick check: counts by North/South and bins
+# Quick check
 model_data_ns %>%
   count(south, treat_q, name = "n_q") %>%
   arrange(south, treat_q) %>%
   print()
 
-model_data_ns %>%
-  count(south, treat_t, name = "n_t") %>%
-  arrange(south, treat_t) %>%
-  print()
+# =========================================================
+# 3) QUARTILE HETEROGENEITY MODELS
+# Baseline: Q1 in North (south == 0)
+# =========================================================
 
-
-# 2A. Quartile heterogeneity: North vs South (with controls)
-
-# NOTE:
-# factor(treat_q) * south = factor(treat_q) + south + factor(treat_q):south
-# Baseline: Q1 in the North (treat_q == 1, south == 0)
-
-# -------- Religious outcomes (quartiles × South) -----------
-
-lpm_fe_q_controls_cat_ns <- feols(
-  CATHOLIC ~ factor(treat_q) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
+# Religious practice
 lpm_fe_q_controls_rel_ns <- feols(
   RELIGIOUS_PRACTICE ~ factor(treat_q) * south +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data_ns,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
 
-lpm_fe_q_controls_cou_ns <- feols(
-  COUPLE_CATHOLIC ~ factor(treat_q) * south +
+# Conservative vote
+lpm_fe_q_controls_con_ns <- feols(
+  CONSERVATIVE_VOTE ~ factor(treat_q) * south +
     FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
     BIRTH + prov_nac,
   data    = model_data_ns,
-  cluster = ~prov_nac
+  cluster = ~ prov_nac
 )
 
-# Joint test: ADRF equal in North vs South (religious outcomes)
-wald_q_cat_ns <- wald(
-  lpm_fe_q_controls_cat_ns,
-  "factor(treat_q)2:south = 0 & factor(treat_q)3:south = 0 & factor(treat_q)4:south = 0"
+# Left-right
+lpm_fe_q_controls_lr_ns <- feols(
+  LEFT_RIGHT ~ factor(treat_q) * south +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
+    BIRTH + prov_nac,
+  data    = model_data_ns,
+  cluster = ~ prov_nac
 )
+
+# Joint tests: are quartile profiles different in North vs South?
 wald_q_rel_ns <- wald(
   lpm_fe_q_controls_rel_ns,
   "factor(treat_q)2:south = 0 & factor(treat_q)3:south = 0 & factor(treat_q)4:south = 0"
 )
-wald_q_cou_ns <- wald(
-  lpm_fe_q_controls_cou_ns,
-  "factor(treat_q)2:south = 0 & factor(treat_q)3:south = 0 & factor(treat_q)4:south = 0"
-)
 
-wald_q_cat_ns
-wald_q_rel_ns
-wald_q_cou_ns
-
-modelsummary(
-  list(
-    "Catholic – Q × South"           = lpm_fe_q_controls_cat_ns,
-    "Religious practice – Q × South" = lpm_fe_q_controls_rel_ns,
-    "Couple Catholic – Q × South"    = lpm_fe_q_controls_cou_ns
-  ),
-  title = "Heterogeneity North vs South – Quartile ADRF (religious outcomes)",
-  output = "latex",
-  stars  = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
-)
-
-# -------- Political outcomes (quartiles × South) -----------
-
-lpm_fe_q_controls_par_ns <- feols(
-  PARTICIPATION ~ factor(treat_q) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_con_ns <- feols(
-  CONSERVATIVE_VOTE ~ factor(treat_q) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_lr_ns <- feols(
-  LEFT_RIGHT ~ factor(treat_q) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-wald_q_par_ns <- wald(
-  lpm_fe_q_controls_par_ns,
-  "factor(treat_q)2:south = 0 & factor(treat_q)3:south = 0 & factor(treat_q)4:south = 0"
-)
 wald_q_con_ns <- wald(
   lpm_fe_q_controls_con_ns,
   "factor(treat_q)2:south = 0 & factor(treat_q)3:south = 0 & factor(treat_q)4:south = 0"
 )
+
 wald_q_lr_ns <- wald(
   lpm_fe_q_controls_lr_ns,
   "factor(treat_q)2:south = 0 & factor(treat_q)3:south = 0 & factor(treat_q)4:south = 0"
 )
 
-wald_q_par_ns
+wald_q_rel_ns
 wald_q_con_ns
 wald_q_lr_ns
 
+# Optional regression table
 modelsummary(
   list(
-    "Participation – Q × South" = lpm_fe_q_controls_par_ns,
-    "Conservative – Q × South"  = lpm_fe_q_controls_con_ns,
-    "Left-right – Q × South"    = lpm_fe_q_controls_lr_ns
+    "Religious practice – Q × South" = lpm_fe_q_controls_rel_ns,
+    "Conservative vote – Q × South"  = lpm_fe_q_controls_con_ns,
+    "Left-right – Q × South"         = lpm_fe_q_controls_lr_ns
   ),
-  title = "Heterogeneity North vs South – Quartile ADRF (political outcomes)",
+  title = "Heterogeneity North vs South – Quartiles",
   output = "latex",
   stars  = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
   gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
 )
 
+# =========================================================
+# 4) PLOT FUNCTION: QUARTILE ADRF, NORTH VS SOUTH
+# =========================================================
 
-# 2B. Tertile heterogeneity: North vs South (with controls)
-
-# NOTE:
-# Baseline: T1 in the North (treat_t == 1, south == 0)
-
-# -------- Religious outcomes (tertiles × South) ------------
-
-lpm_fe_t_controls_cat_ns <- feols(
-  CATHOLIC ~ factor(treat_t) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-lpm_fe_t_controls_rel_ns <- feols(
-  RELIGIOUS_PRACTICE ~ factor(treat_t) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-lpm_fe_t_controls_cou_ns <- feols(
-  COUPLE_CATHOLIC ~ factor(treat_t) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-wald_t_cat_ns <- wald(
-  lpm_fe_t_controls_cat_ns,
-  "factor(treat_t)2:south = 0 & factor(treat_t)3:south = 0"
-)
-wald_t_rel_ns <- wald(
-  lpm_fe_t_controls_rel_ns,
-  "factor(treat_t)2:south = 0 & factor(treat_t)3:south = 0"
-)
-wald_t_cou_ns <- wald(
-  lpm_fe_t_controls_cou_ns,
-  "factor(treat_t)2:south = 0 & factor(treat_t)3:south = 0"
-)
-
-wald_t_cat_ns
-wald_t_rel_ns
-wald_t_cou_ns
-
-modelsummary(
-  list(
-    "Catholic – T × South"           = lpm_fe_t_controls_cat_ns,
-    "Religious practice – T × South" = lpm_fe_t_controls_rel_ns,
-    "Couple Catholic – T × South"    = lpm_fe_t_controls_cou_ns
-  ),
-  title = "Heterogeneity North vs South – Tertile ADRF (religious outcomes)",
-  output = "latex",
-  stars  = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
-)
-
-# -------- Political outcomes (tertiles × South) ------------
-
-lpm_fe_t_controls_par_ns <- feols(
-  PARTICIPATION ~ factor(treat_t) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-lpm_fe_t_controls_con_ns <- feols(
-  CONSERVATIVE_VOTE ~ factor(treat_t) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-lpm_fe_t_controls_lr_ns <- feols(
-  LEFT_RIGHT ~ factor(treat_t) * south +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
-    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data    = model_data_ns,
-  cluster = ~prov_nac
-)
-
-wald_t_par_ns <- wald(
-  lpm_fe_t_controls_par_ns,
-  "factor(treat_t)2:south = 0 & factor(treat_t)3:south = 0"
-)
-wald_t_con_ns <- wald(
-  lpm_fe_t_controls_con_ns,
-  "factor(treat_t)2:south = 0 & factor(treat_t)3:south = 0"
-)
-wald_t_lr_ns <- wald(
-  lpm_fe_t_controls_lr_ns,
-  "factor(treat_t)2:south = 0 & factor(treat_t)3:south = 0"
-)
-
-wald_t_par_ns
-wald_t_con_ns
-wald_t_lr_ns
-
-modelsummary(
-  list(
-    "Participation – T × South" = lpm_fe_t_controls_par_ns,
-    "Conservative – T × South"  = lpm_fe_t_controls_con_ns,
-    "Left-right – T × South"    = lpm_fe_t_controls_lr_ns
-  ),
-  title = "Heterogeneity North vs South – Tertile ADRF (political outcomes)",
-  output = "latex",
-  stars  = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
-)
-
-
-# PLOTS: North vs South ADRF (print to console, no files)
-#   - For each outcome: Quartile ADRF + Tertile ADRF
-#   - Baseline = Q1/T1 in the North (south == 0)
-# Folder to save figures
-out_dir <- "north_south_plots"
-dir.create(out_dir, showWarnings = FALSE)
-
-plot_adrf_ns_ci <- function(mod, which = c("q","t"),
-                            title = "", subtitle = "",
-                            file = NULL, level = 0.95) {
-  which <- match.arg(which)
-  k <- if (which == "q") 4 else 3
-  bin_label <- if (which == "q") "Q" else "T"
-  fac_name  <- if (which == "q") "factor(treat_q)" else "factor(treat_t)"
+plot_adrf_ns_ci <- function(mod,
+                            title = "",
+                            subtitle = "",
+                            file_pdf = NULL,
+                            file_png = NULL,
+                            level = 0.95) {
   
   beta <- coef(mod)
-  V <- vcov(mod)  # clustered vcov already baked in given cluster= in feols
+  V <- vcov(mod)
+  z <- qnorm(1 - (1 - level) / 2)
   
-  # scalar-safe getter
-  getb1 <- function(nm) if (!is.na(nm) && nm %in% names(beta)) unname(beta[[nm]]) else 0
-  
-  # delta method for linear combination a' beta
   lincomb <- function(terms, weights) {
-    # keep only terms that exist in model
     ok <- terms %in% names(beta)
     terms_ok <- terms[ok]
     w_ok <- weights[ok]
     
-    est <- sum(w_ok * beta[terms_ok])
+    est <- if (length(terms_ok) == 0) 0 else sum(w_ok * beta[terms_ok])
     
     if (length(terms_ok) == 0) {
       return(list(est = 0, se = NA_real_))
@@ -7478,61 +6863,52 @@ plot_adrf_ns_ci <- function(mod, which = c("q","t"),
     
     Vsub <- V[terms_ok, terms_ok, drop = FALSE]
     var <- as.numeric(t(w_ok) %*% Vsub %*% w_ok)
-    se <- sqrt(pmax(var, 0))
+    se  <- sqrt(pmax(var, 0))
     
     list(est = est, se = se)
   }
   
-  z <- qnorm(1 - (1 - level) / 2)
-  
   df <- expand.grid(
     group = c("North", "South"),
-    bin = 1:k
+    bin   = 1:4
   ) |>
     as_tibble() |>
     mutate(
-      bin_name = paste0(bin_label, bin),
-      
-      # Build the linear combination for each point:
-      # North bin1: 0
-      # North binj: factor(...)j
-      # South bin1: south
-      # South binj: south + factor(...)j + factor(...)j:south
       comb = pmap(list(group, bin), function(g, j) {
         if (g == "North" && j == 1) {
           return(list(terms = character(0), w = numeric(0)))
         }
         if (g == "North" && j != 1) {
-          return(list(terms = c(paste0(fac_name, j)), w = c(1)))
+          return(list(terms = c(paste0("factor(treat_q)", j)), w = c(1)))
         }
         if (g == "South" && j == 1) {
           return(list(terms = c("south"), w = c(1)))
         }
-        # South & j != 1
         return(list(
-          terms = c("south", paste0(fac_name, j), paste0(fac_name, j, ":south")),
-          w     = c(1, 1, 1)
+          terms = c("south",
+                    paste0("factor(treat_q)", j),
+                    paste0("factor(treat_q)", j, ":south")),
+          w = c(1, 1, 1)
         ))
       }),
-      
-      est_se = map(comb, ~ lincomb(.x$terms, .x$w)),
-      y = map_dbl(est_se, "est"),
-      se = map_dbl(est_se, "se"),
+      est_se  = map(comb, ~ lincomb(.x$terms, .x$w)),
+      y       = map_dbl(est_se, "est"),
+      se      = map_dbl(est_se, "se"),
       ci_low  = y - z * se,
       ci_high = y + z * se
     ) |>
-    select(group, bin, bin_name, y, se, ci_low, ci_high)
+    select(group, bin, y, se, ci_low, ci_high)
   
   p <- ggplot(df, aes(x = bin, y = y, color = group, fill = group, group = group)) +
     geom_hline(yintercept = 0, linetype = "dashed") +
     geom_ribbon(aes(ymin = ci_low, ymax = ci_high), alpha = 0.18, color = NA) +
     geom_line(linewidth = 0.7) +
     geom_point(size = 2) +
-    scale_x_continuous(breaks = 1:k, labels = paste0(bin_label, 1:k)) +
+    scale_x_continuous(breaks = 1:4, labels = paste0("Q", 1:4)) +
     labs(
       title = title,
       subtitle = subtitle,
-      x = if (which == "q") "Treatment quartile (baseline = Q1 North)" else "Treatment tertile (baseline = T1 North)",
+      x = "Treatment quartile (baseline = Q1 in North)",
       y = paste0("Estimated level relative to baseline (", round(level * 100), "% CI)"),
       color = NULL,
       fill = NULL
@@ -7542,506 +6918,1581 @@ plot_adrf_ns_ci <- function(mod, which = c("q","t"),
   
   print(p)
   
-  if (!is.null(file)) {
-    ggsave(filename = file, plot = p, width = 7.2, height = 4.6, dpi = 300)
+  if (!is.null(file_pdf)) {
+    ggsave(
+      filename = file_pdf,
+      plot = p,
+      device = cairo_pdf,
+      width = 8,
+      height = 5,
+      units = "in"
+    )
+  }
+  
+  if (!is.null(file_png)) {
+    ggsave(
+      filename = file_png,
+      plot = p,
+      width = 8,
+      height = 5,
+      units = "in",
+      dpi = 600,
+      bg = "white"
+    )
   }
   
   invisible(p)
 }
 
-# ---- Run and save all plots ----
-mods_ns <- list(
-  Catholic            = list(q = lpm_fe_q_controls_cat_ns, t = lpm_fe_t_controls_cat_ns),
-  Religious_practice  = list(q = lpm_fe_q_controls_rel_ns, t = lpm_fe_t_controls_rel_ns),
-  Couple_catholic     = list(q = lpm_fe_q_controls_cou_ns, t = lpm_fe_t_controls_cou_ns),
-  Participation       = list(q = lpm_fe_q_controls_par_ns, t = lpm_fe_t_controls_par_ns),
-  Conservative_vote   = list(q = lpm_fe_q_controls_con_ns, t = lpm_fe_t_controls_con_ns),
-  Left_right          = list(q = lpm_fe_q_controls_lr_ns, t = lpm_fe_t_controls_lr_ns)
+# =========================================================
+# 5) SAVE THE SAME 3 QUARTILE HETEROGENEITY PLOTS
+# =========================================================
+
+out_dir <- "north_south_heterogeneity_quartile_plots"
+dir.create(out_dir, showWarnings = FALSE)
+
+# 1. Conservative vote
+p_q_conservative_ns <- plot_adrf_ns_ci(
+  mod = lpm_fe_q_controls_con_ns,
+  title = "Conservative vote — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in North; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Conservative_vote_NorthSouth.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Conservative_vote_NorthSouth.png")
 )
 
-for (y in names(mods_ns)) {
-  plot_adrf_ns_ci(
-    mod = mods_ns[[y]]$q,
-    which = "q",
-    title = paste0(y, " — Quartile ADRF (North vs South)"),
-    subtitle = "Baseline: Q1 in North; FE: birth year + province; controls included",
-    file = file.path(out_dir, paste0("Q_NorthSouth_", y, "_CI.png"))
-  )
-  
-  plot_adrf_ns_ci(
-    mod = mods_ns[[y]]$t,
-    which = "t",
-    title = paste0(y, " — Tertile ADRF (North vs South)"),
-    subtitle = "Baseline: T1 in North; FE: birth year + province; controls included",
-    file = file.path(out_dir, paste0("T_NorthSouth_", y, "_CI.png"))
-  )
+# 2. Religious practice
+p_q_religious_ns <- plot_adrf_ns_ci(
+  mod = lpm_fe_q_controls_rel_ns,
+  title = "Religious practice — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in North; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Religious_practice_NorthSouth.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Religious_practice_NorthSouth.png")
+)
+
+# 3. Left-right
+p_q_leftright_ns <- plot_adrf_ns_ci(
+  mod = lpm_fe_q_controls_lr_ns,
+  title = "Left-right — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in North; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Left_right_NorthSouth.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Left_right_NorthSouth.png")
+)
+
+# Catholic
+lpm_fe_q_controls_cat_ns <- feols(
+  CATHOLIC ~ factor(treat_q) * south +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
+    BIRTH + prov_nac,
+  data    = model_data_ns,
+  cluster = ~ prov_nac
+)
+
+# Optional joint test
+wald_q_cat_ns <- wald(
+  lpm_fe_q_controls_cat_ns,
+  "factor(treat_q)2:south = 0 & factor(treat_q)3:south = 0 & factor(treat_q)4:south = 0"
+)
+
+wald_q_cat_ns
+
+# 4. Catholic
+p_q_catholic_ns <- plot_adrf_ns_ci(
+  mod = lpm_fe_q_controls_cat_ns,
+  title = "Catholic — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in North; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Catholic_NorthSouth.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Catholic_NorthSouth.png")
+)
+
+modelsummary(
+  list(
+    "Catholic – Q × South"           = lpm_fe_q_controls_cat_ns,
+    "Religious practice – Q × South" = lpm_fe_q_controls_rel_ns,
+    "Conservative vote – Q × South"  = lpm_fe_q_controls_con_ns,
+    "Left-right – Q × South"         = lpm_fe_q_controls_lr_ns
+  ),
+  title = "Heterogeneity North vs South – Quartiles",
+  output = "latex",
+  stars  = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
+)
+
+# Wald tests for interaction terms
+# Joint Wald tests: all Q × south interactions = 0
+wald_cat_ns <- fixest::wald(lpm_fe_q_controls_cat_ns, keep = "factor\\(treat_q\\)[234]:south")
+wald_rel_ns <- fixest::wald(lpm_fe_q_controls_rel_ns, keep = "factor\\(treat_q\\)[234]:south")
+wald_con_ns <- fixest::wald(lpm_fe_q_controls_con_ns, keep = "factor\\(treat_q\\)[234]:south")
+wald_lr_ns  <- fixest::wald(lpm_fe_q_controls_lr_ns,  keep = "factor\\(treat_q\\)[234]:south")
+
+get_wald_p_print <- function(mod, keep_pattern) {
+  out <- capture.output(w <- fixest::wald(mod, keep = keep_pattern))
+  p_line <- grep("p-value =", out, value = TRUE)
+  as.numeric(sub(".*p-value = ([0-9.]+).*", "\\1", p_line[1]))
 }
 
-# Heterogeneity: Number of cofradias --------------------------------------
+p_cat_ns <- round(get_wald_p_print(lpm_fe_q_controls_cat_ns, "factor\\(treat_q\\)[234]:south"), 3)
+p_rel_ns <- round(get_wald_p_print(lpm_fe_q_controls_rel_ns, "factor\\(treat_q\\)[234]:south"), 3)
+p_con_ns <- round(get_wald_p_print(lpm_fe_q_controls_con_ns, "factor\\(treat_q\\)[234]:south"), 3)
+p_lr_ns  <- round(get_wald_p_print(lpm_fe_q_controls_lr_ns,  "factor\\(treat_q\\)[234]:south"), 3)
+depvar_mean <- function(mod) {
+  round(mean(fitted(mod) + resid(mod), na.rm = TRUE), 2)
+}
+
+depvar_mean <- function(mod) {
+  round(mean(fitted(mod) + resid(mod), na.rm = TRUE), 2)
+}
+
+modelsummary(
+  list(
+    "Catholic – Q × South"          = lpm_fe_q_controls_cat_ns,
+    "Conservative vote – Q × South" = lpm_fe_q_controls_con_ns
+  ),
+  title = "Heterogeneity North vs South – Quartiles",
+  output = "latex",
+  stars  = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
+  add_rows = tibble::tibble(
+    term = c("Controls", "Mean dep. var.", "Wald test p-value"),
+    `Catholic – Q × South`          = c("Yes", depvar_mean(lpm_fe_q_controls_cat_ns), p_cat_ns),
+    `Conservative vote – Q × South` = c("Yes", depvar_mean(lpm_fe_q_controls_con_ns), p_con_ns)
+  )
+)
+
+# Heterogeneity: High vs Low brotherhood density (cofradias per 100k above median) ----
 
 library(dplyr)
-library(stringr)
-library(purrr)
 library(readr)
-library(httr2)
-library(jsonlite)
+library(readxl)
+library(stringr)
+library(stringi)
 library(fixest)
 library(modelsummary)
+library(broom)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(tibble)
 
-# You already have these from your pipeline:
-# - normalize_name()
-# - prov_code_map: prov_nac + provincia_official + provincia_norm
-# - survey: your merged survey_with_childhood_weather_harmonized.csv loaded
+# =========================================================
+# 0) ASSUMPTION
+# =========================================================
+# This code assumes you already have these objects in memory from your main script:
+#   - survey
+#   - normalize_name()
+#   - name_map
+#   - prov_code_map
+#
+# If not, run the earlier harmonization / mapping section first.
 
+# =========================================================
+# 1) LOAD BROTHERHOODS BY PROVINCE + POPULATION, BUILD DENSITY
+# =========================================================
 
-# A) Scrape cofradiasyhermandades localidad pages -> province totals
+cofradias_raw <- readr::read_csv(
+  "cofradias_y_hermandades_por_provincia.csv",
+  locale = readr::locale(encoding = "UTF-8")
+)
 
-dir.create("cofradias_cache", showWarnings = FALSE)
+# INE population file you uploaded (2021 province totals)
+pop_2021_raw <- readxl::read_excel(
+  "2852.xlsx",
+  sheet = "tabla-2852",
+  col_names = FALSE
+)
 
-fetch_localidad <- function(cc, sleep = 0.25) {
-  cache_file <- file.path("cofradias_cache", paste0("cc_", cc, ".html"))
-  
-  if (file.exists(cache_file)) {
-    html <- read_file(cache_file)
-  } else {
-    url <- paste0(
-      "https://www.cofradiasyhermandades.es/fichalocalidad.php?b=1&cc=", cc,
-      "&g=1&g0=1&g1=1&g2=1&g3=1&g4=1&g5=1&g6=1&n=1&p=1&r=1&s=1"
-    )
-    req <- request(url) |>
-      req_user_agent("research-academic/1.0 (contact: you@uni.edu)") |>
-      req_timeout(30)
-    
-    resp <- try(req_perform(req), silent = TRUE)
-    if (inherits(resp, "try-error") || resp_status(resp) >= 400) return(NULL)
-    
-    html <- resp_body_string(resp)
-    write_file(html, cache_file)
-    Sys.sleep(sleep)
-  }
-  
-  # Must contain province and the cofradías count line
-  if (!str_detect(html, "provincia de") || !str_detect(html, "COFRAD")) return(NULL)
-  
-  prov <- str_match(html, "provincia de\\s+([^<\\n\\r]+)")[,2] |> str_squish()
-  ncof <- str_match(html, "COFRAD[ÍI]AS Y HERMANDADES\\s*\\|\\s*(\\d+)")[,2] |> as.integer()
-  
-  if (is.na(prov) || is.na(ncof)) return(NULL)
-  
-  tibble(cc = cc, provincia_raw = prov, cofradias_localidad = ncof)
-}
-
-# Choose an upper bound for cc.
-# We know some valid ones are in the thousands (e.g., Madrid has cc=6902) so start with 10000.
-cc_max <- 10000
-raw_loc <- map_dfr(1:cc_max, fetch_localidad)
-
-prov_cofr <- raw_loc %>%
-  mutate(provincia_norm = normalize_name(provincia_raw)) %>%
-  group_by(provincia_norm) %>%
-  summarise(cofradias_total = sum(cofradias_localidad, na.rm = TRUE),
-            n_localidades = n(),
-            .groups = "drop") %>%
-  left_join(prov_code_map, by = "provincia_norm") %>%   # adds provincia_official, prov_nac
-  filter(!is.na(prov_nac))
-
-# B) INE population by province (latest year) via API table 2852
-
-# INE Tempus API: table 2852. nult=1 returns latest period.
-# We'll keep Total sex and Total (both sexes) if available.
-ine_url <- "https://servicios.ine.es/wstempus/js/ES/DATOS_TABLA/2852?nult=1"
-
-ine_raw <- fromJSON(paste(readLines(ine_url, warn = FALSE), collapse = ""))
-
-# The API structure is a list of records with fields like Nombre (dimensions) and Valor
-ine_pop <- tibble(
-  Nombre = ine_raw$Nombre,
-  Valor  = as.numeric(gsub(",", ".", ine_raw$Valor)),  # just in case decimals/format
-  Periodo = ine_raw$Periodo
-) %>%
-  # keep "Total" sex series if present
-  # (INE often encodes dimension names inside Nombre; we filter robustly)
-  filter(str_detect(Nombre, "Total")) %>%
-  # extract province label from Nombre (works for "Albacete. Total. Total" style strings)
-  mutate(
-    provincia = str_trim(str_extract(Nombre, "^[^\\.]+"))
+# Clean province populations from the uploaded INE table
+pop_2021 <- pop_2021_raw %>%
+  transmute(
+    provincia_raw = as.character(...1),
+    population    = suppressWarnings(as.numeric(...2))
   ) %>%
-  group_by(provincia) %>%
-  summarise(pop = sum(Valor, na.rm = TRUE),  # should be one row per province already
-            .groups = "drop") %>%
-  mutate(provincia_norm = normalize_name(provincia)) %>%
-  left_join(prov_code_map, by = "provincia_norm") %>%
-  select(prov_nac, provincia_official, pop) %>%
-  filter(!is.na(prov_nac))
-
-
-# C) Province index: cofradías per 100k + log index, Top 20 provinces
-
-prov_index <- prov_cofr %>%
-  left_join(ine_pop, by = "prov_nac") %>%
+  filter(!is.na(population), !is.na(provincia_raw)) %>%
   mutate(
-    cofr_per_100k = 1e5 * cofradias_total / pop,
-    ss_importance_idx = log1p(cofr_per_100k)
+    provincia_name = stringr::str_trim(stringr::str_remove(provincia_raw, "^\\d{1,2}\\s+")),
+    key = normalize_name(provincia_name)
   ) %>%
-  arrange(desc(ss_importance_idx))
+  left_join(name_map, by = "key") %>%
+  mutate(
+    provincia_official = dplyr::coalesce(ine_name, provincia_name),
+    provincia_norm = normalize_name(provincia_official)
+  ) %>%
+  left_join(
+    prov_code_map %>% dplyr::select(prov_nac, provincia_norm),
+    by = "provincia_norm"
+  ) %>%
+  filter(!is.na(prov_nac)) %>%
+  distinct(prov_nac, .keep_all = TRUE) %>%
+  transmute(
+    prov_nac = as.integer(prov_nac),
+    pop_2021 = as.numeric(population)
+  )
 
-top20_prov_nac <- prov_index %>%
-  slice_head(n = 20) %>%
-  pull(prov_nac)
+# Clean brotherhood counts by province
+cofradias_prov <- cofradias_raw %>%
+  mutate(
+    key = normalize_name(provincia)
+  ) %>%
+  left_join(name_map, by = "key") %>%
+  mutate(
+    provincia_official = dplyr::coalesce(ine_name, provincia),
+    provincia_norm = normalize_name(provincia_official)
+  ) %>%
+  left_join(
+    prov_code_map %>% dplyr::select(prov_nac, provincia_norm),
+    by = "provincia_norm"
+  ) %>%
+  filter(!is.na(prov_nac)) %>%
+  group_by(prov_nac) %>%
+  summarise(
+    n_cofradias = sum(n_cofradias, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(pop_2021, by = "prov_nac") %>%
+  mutate(
+    cofradias_per_100k = 100000 * n_cofradias / pop_2021
+  )
 
-print(prov_index %>% slice_head(n = 25) %>% select(prov_nac, provincia_official, cofradias_total, pop, cofr_per_100k, ss_importance_idx))
+# Median split: strictly above median = high
+median_cofradias_100k <- median(cofradias_prov$cofradias_per_100k, na.rm = TRUE)
 
+cofradias_prov <- cofradias_prov %>%
+  mutate(
+    high_cofradias = as.integer(cofradias_per_100k > median_cofradias_100k)
+  )
 
-# D) Run your heterogeneity regressions (Top20 dummy)
+# Quick check
+cofradias_prov %>%
+  arrange(desc(cofradias_per_100k)) %>%
+  print(n = Inf)
 
-model_data_ns <- survey %>%
+cofradias_prov %>%
+  summarise(
+    n_prov = n(),
+    median_cofradias_100k = median(cofradias_per_100k, na.rm = TRUE),
+    mean_cofradias_100k = mean(cofradias_per_100k, na.rm = TRUE)
+  ) %>%
+  print()
+
+cofradias_prov %>%
+  count(high_cofradias, name = "n_provinces") %>%
+  print()
+
+# =========================================================
+# 2) BUILD MODEL DATA WITH HIGH-COFRADIAS DUMMY
+# =========================================================
+
+model_data_cof <- survey %>%
   filter(
     BORN_SPAIN == 1,
     !is.na(childhood_total_dry_days),
     childhood_total_dry_days != 0
   ) %>%
+  left_join(
+    cofradias_prov %>%
+      dplyr::select(prov_nac, cofradias_per_100k, high_cofradias),
+    by = "prov_nac"
+  ) %>%
+  filter(!is.na(high_cofradias)) %>%
   mutate(
-    high_cofr = as.integer(prov_nac %in% top20_prov_nac),
+    year  = BIRTH,
+    birth_prov_cluster = interaction(BIRTH, prov_nac),
     childhood_total_dry_days_std =
       (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
-      sd(childhood_total_dry_days,  na.rm = TRUE),
+      sd(childhood_total_dry_days, na.rm = TRUE),
     treat_q = ntile(childhood_total_dry_days_std, 4),
-    treat_t = ntile(childhood_total_dry_days_std, 3)
+    log_pop_birth = log(pop_birth_last_census)
   )
 
-# Quartiles × high_cofr (religious outcomes) 
-lpm_fe_q_controls_cat <- feols(
-  CATHOLIC ~ factor(treat_q) * high_cofr +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+# Quick check
+model_data_cof %>%
+  count(high_cofradias, treat_q, name = "n_q") %>%
+  arrange(high_cofradias, treat_q) %>%
+  print()
+
+model_data_cof %>%
+  count(high_cofradias, name = "n_group") %>%
+  print()
+
+# =========================================================
+# 3) QUARTILE HETEROGENEITY MODELS
+# Baseline: Q1 in LOW-cofradias provinces (high_cofradias == 0)
+# =========================================================
+
+# Catholic
+lpm_fe_q_controls_cat_cof <- feols(
+  CATHOLIC ~ factor(treat_q) * high_cofradias +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
     BIRTH + prov_nac,
-  data = model_data_ns, cluster = ~prov_nac
+  data    = model_data_cof,
+  cluster = ~ prov_nac
 )
 
-lpm_fe_q_controls_rel <- feols(
-  RELIGIOUS_PRACTICE ~ factor(treat_q) * high_cofr +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+# Religious practice
+lpm_fe_q_controls_rel_cof <- feols(
+  RELIGIOUS_PRACTICE ~ factor(treat_q) * high_cofradias +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
     BIRTH + prov_nac,
-  data = model_data_ns, cluster = ~prov_nac
+  data    = model_data_cof,
+  cluster = ~ prov_nac
 )
 
-lpm_fe_q_controls_cou <- feols(
-  COUPLE_CATHOLIC ~ factor(treat_q) * high_cofr +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
+# Conservative vote
+lpm_fe_q_controls_con_cof <- feols(
+  CONSERVATIVE_VOTE ~ factor(treat_q) * high_cofradias +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
     BIRTH + prov_nac,
-  data = model_data_ns, cluster = ~prov_nac
+  data    = model_data_cof,
+  cluster = ~ prov_nac
 )
 
-# Joint test: heterogeneity across quartiles
-wald(lpm_fe_q_controls_cat,
-     "factor(treat_q)2:high_cofr = 0 & factor(treat_q)3:high_cofr = 0 & factor(treat_q)4:high_cofr = 0")
+# Left-right
+lpm_fe_q_controls_lr_cof <- feols(
+  LEFT_RIGHT ~ factor(treat_q) * high_cofradias +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
+    BIRTH + prov_nac,
+  data    = model_data_cof,
+  cluster = ~ prov_nac
+)
+
+# =========================================================
+# 4) JOINT WALD TESTS: ARE QUARTILE PROFILES DIFFERENT
+#    ACROSS LOW- VS HIGH-COFRADIAS PROVINCES?
+# =========================================================
+
+wald_cat_cof <- fixest::wald(
+  lpm_fe_q_controls_cat_cof,
+  keep = "factor\\(treat_q\\)[234]:high_cofradias"
+)
+
+wald_rel_cof <- fixest::wald(
+  lpm_fe_q_controls_rel_cof,
+  keep = "factor\\(treat_q\\)[234]:high_cofradias"
+)
+
+wald_con_cof <- fixest::wald(
+  lpm_fe_q_controls_con_cof,
+  keep = "factor\\(treat_q\\)[234]:high_cofradias"
+)
+
+wald_lr_cof <- fixest::wald(
+  lpm_fe_q_controls_lr_cof,
+  keep = "factor\\(treat_q\\)[234]:high_cofradias"
+)
+
+wald_cat_cof
+wald_rel_cof
+wald_con_cof
+wald_lr_cof
+
+# Helper to extract p-value from printed fixest::wald output
+get_wald_p_print <- function(mod, keep_pattern) {
+  out <- capture.output(w <- fixest::wald(mod, keep = keep_pattern))
+  p_line <- grep("p-value =", out, value = TRUE)
+  as.numeric(sub(".*p-value = ([0-9.]+).*", "\\1", p_line[1]))
+}
+
+p_cat_cof <- round(get_wald_p_print(lpm_fe_q_controls_cat_cof, "factor\\(treat_q\\)[234]:high_cofradias"), 3)
+p_rel_cof <- round(get_wald_p_print(lpm_fe_q_controls_rel_cof, "factor\\(treat_q\\)[234]:high_cofradias"), 3)
+p_con_cof <- round(get_wald_p_print(lpm_fe_q_controls_con_cof, "factor\\(treat_q\\)[234]:high_cofradias"), 3)
+p_lr_cof  <- round(get_wald_p_print(lpm_fe_q_controls_lr_cof,  "factor\\(treat_q\\)[234]:high_cofradias"), 3)
+
+# Mean DV on estimation sample
+depvar_mean <- function(mod) {
+  round(mean(fitted(mod) + resid(mod), na.rm = TRUE), 2)
+}
+
+# =========================================================
+# 5) TABLE
+# =========================================================
 
 modelsummary(
   list(
-    "Catholic – Q × Top20(cofr/pop)"           = lpm_fe_q_controls_cat,
-    "Religious practice – Q × Top20(cofr/pop)" = lpm_fe_q_controls_rel,
-    "Couple Catholic – Q × Top20(cofr/pop)"    = lpm_fe_q_controls_cou
+    "Catholic – Q × High cofradias"           = lpm_fe_q_controls_cat_cof,
+    "Religious practice – Q × High cofradias" = lpm_fe_q_controls_rel_cof,
+    "Conservative vote – Q × High cofradias"  = lpm_fe_q_controls_con_cof,
+    "Left-right – Q × High cofradias"         = lpm_fe_q_controls_lr_cof
   ),
-  title = "Heterogeneity by cofradías per person (Top 20 provinces) – Quartile ADRF (religious outcomes)",
+  title = "Heterogeneity by cofradias density – Quartiles",
   output = "latex",
   stars  = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
+  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
+  add_rows = tibble::tibble(
+    term = c("Controls", "Mean dep. var.", "Wald test p-value"),
+    `Catholic – Q × High cofradias`           = c("Yes", depvar_mean(lpm_fe_q_controls_cat_cof), p_cat_cof),
+    `Religious practice – Q × High cofradias` = c("Yes", depvar_mean(lpm_fe_q_controls_rel_cof), p_rel_cof),
+    `Conservative vote – Q × High cofradias`  = c("Yes", depvar_mean(lpm_fe_q_controls_con_cof), p_con_cof),
+    `Left-right – Q × High cofradias`         = c("Yes", depvar_mean(lpm_fe_q_controls_lr_cof), p_lr_cof)
+  )
 )
 
-# Quartiles × high_cofr (political outcomes) 
-lpm_fe_q_controls_par <- feols(
-  PARTICIPATION ~ factor(treat_q) * high_cofr +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data = model_data_ns, cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_con <- feols(
-  CONSERVATIVE_VOTE ~ factor(treat_q) * high_cofr +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data = model_data_ns, cluster = ~prov_nac
-)
-
-lpm_fe_q_controls_lr <- feols(
-  LEFT_RIGHT ~ factor(treat_q) * high_cofr +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data = model_data_ns, cluster = ~prov_nac
-)
-
+# Optional shorter table like the one you had at the end
 modelsummary(
   list(
-    "Participation – Q × Top20(cofr/pop)" = lpm_fe_q_controls_par,
-    "Conservative – Q × Top20(cofr/pop)"  = lpm_fe_q_controls_con,
-    "Left-right – Q × Top20(cofr/pop)"    = lpm_fe_q_controls_lr
+    "Catholic – Q × High cofradias"          = lpm_fe_q_controls_cat_cof,
+    "Conservative vote – Q × High cofradias" = lpm_fe_q_controls_con_cof
   ),
-  title = "Heterogeneity by cofradías per person (Top 20 provinces) – Quartile ADRF (political outcomes)",
+  title = "Heterogeneity by cofradias density – Quartiles",
   output = "latex",
   stars  = c("*" = .1, "**" = .05, "***" = .01),
   coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
+  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
+  add_rows = tibble::tibble(
+    term = c("Controls", "Mean dep. var.", "Wald test p-value"),
+    `Catholic – Q × High cofradias`          = c("Yes", depvar_mean(lpm_fe_q_controls_cat_cof), p_cat_cof),
+    `Conservative vote – Q × High cofradias` = c("Yes", depvar_mean(lpm_fe_q_controls_con_cof), p_con_cof)
+  )
 )
 
-# Tertiles × high_cofr (optional; mirror your old block)
-lpm_fe_t_controls_cat <- feols(
-  CATHOLIC ~ factor(treat_t) * high_cofr +
-    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year |
-    BIRTH + prov_nac,
-  data = model_data_ns, cluster = ~prov_nac
+# =========================================================
+# 6) PLOT FUNCTION: QUARTILE ADRF, LOW VS HIGH COFRADIAS
+# =========================================================
+
+plot_adrf_cof_ci <- function(mod,
+                             title = "",
+                             subtitle = "",
+                             file_pdf = NULL,
+                             file_png = NULL,
+                             level = 0.95) {
+  
+  beta <- coef(mod)
+  V <- vcov(mod)
+  z <- qnorm(1 - (1 - level) / 2)
+  
+  lincomb <- function(terms, weights) {
+    ok <- terms %in% names(beta)
+    terms_ok <- terms[ok]
+    w_ok <- weights[ok]
+    
+    est <- if (length(terms_ok) == 0) 0 else sum(w_ok * beta[terms_ok])
+    
+    if (length(terms_ok) == 0) {
+      return(list(est = 0, se = NA_real_))
+    }
+    
+    Vsub <- V[terms_ok, terms_ok, drop = FALSE]
+    var <- as.numeric(t(w_ok) %*% Vsub %*% w_ok)
+    se  <- sqrt(pmax(var, 0))
+    
+    list(est = est, se = se)
+  }
+  
+  df <- expand.grid(
+    group = c("Low cofradias", "High cofradias"),
+    bin   = 1:4
+  ) |>
+    as_tibble() |>
+    mutate(
+      comb = pmap(list(group, bin), function(g, j) {
+        if (g == "Low cofradias" && j == 1) {
+          return(list(terms = character(0), w = numeric(0)))
+        }
+        if (g == "Low cofradias" && j != 1) {
+          return(list(terms = c(paste0("factor(treat_q)", j)), w = c(1)))
+        }
+        if (g == "High cofradias" && j == 1) {
+          return(list(terms = c("high_cofradias"), w = c(1)))
+        }
+        return(list(
+          terms = c("high_cofradias",
+                    paste0("factor(treat_q)", j),
+                    paste0("factor(treat_q)", j, ":high_cofradias")),
+          w = c(1, 1, 1)
+        ))
+      }),
+      est_se  = map(comb, ~ lincomb(.x$terms, .x$w)),
+      y       = map_dbl(est_se, "est"),
+      se      = map_dbl(est_se, "se"),
+      ci_low  = y - z * se,
+      ci_high = y + z * se
+    ) |>
+    select(group, bin, y, se, ci_low, ci_high)
+  
+  p <- ggplot(df, aes(x = bin, y = y, color = group, fill = group, group = group)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_ribbon(
+      data = dplyr::filter(df, !is.na(ci_low), !is.na(ci_high)),
+      aes(ymin = ci_low, ymax = ci_high),
+      alpha = 0.18,
+      color = NA,
+      inherit.aes = TRUE
+    ) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 2) +
+    scale_x_continuous(breaks = 1:4, labels = paste0("Q", 1:4)) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = "Treatment quartile (baseline = Q1 in low-cofradias provinces)",
+      y = paste0("Estimated level relative to baseline (", round(level * 100), "% CI)"),
+      color = NULL,
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "bottom")
+  
+  print(p)
+  
+  if (!is.null(file_pdf)) {
+    ggsave(
+      filename = file_pdf,
+      plot = p,
+      device = cairo_pdf,
+      width = 8,
+      height = 5,
+      units = "in"
+    )
+  }
+  
+  if (!is.null(file_png)) {
+    ggsave(
+      filename = file_png,
+      plot = p,
+      width = 8,
+      height = 5,
+      units = "in",
+      dpi = 600,
+      bg = "white"
+    )
+  }
+  
+  invisible(p)
+}
+
+# =========================================================
+# 7) SAVE THE SAME 4 QUARTILE HETEROGENEITY PLOTS
+# =========================================================
+
+out_dir <- "cofradias_density_heterogeneity_quartile_plots"
+dir.create(out_dir, showWarnings = FALSE)
+
+# 1. Conservative vote
+p_q_conservative_cof <- plot_adrf_cof_ci(
+  mod = lpm_fe_q_controls_con_cof,
+  title = "Conservative vote — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in low-cofradias provinces; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Conservative_vote_CofradiasDensity.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Conservative_vote_CofradiasDensity.png")
 )
 
-modelsummary(
-  list("Catholic – T × Top20(cofr/pop)" = lpm_fe_t_controls_cat),
-  title = "Heterogeneity by cofradías per person (Top 20 provinces) – Tertile ADRF (example)",
-  output = "latex",
-  stars  = c("*" = .1, "**" = .05, "***" = .01),
-  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
-  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj."
+# 2. Religious practice
+p_q_religious_cof <- plot_adrf_cof_ci(
+  mod = lpm_fe_q_controls_rel_cof,
+  title = "Religious practice — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in low-cofradias provinces; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Religious_practice_CofradiasDensity.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Religious_practice_CofradiasDensity.png")
 )
 
-# Regressions: flexibility + BOTH parents Catholic interaction
-#   PARENTS_CATHOLIC = 1{father catholic=1 AND mother catholic=1}
+# 3. Left-right
+p_q_leftright_cof <- plot_adrf_cof_ci(
+  mod = lpm_fe_q_controls_lr_cof,
+  title = "Left-right — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in low-cofradias provinces; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Left_right_CofradiasDensity.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Left_right_CofradiasDensity.png")
+)
 
-library(readr)
+# 4. Catholic
+p_q_catholic_cof <- plot_adrf_cof_ci(
+  mod = lpm_fe_q_controls_cat_cof,
+  title = "Catholic — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 in low-cofradias provinces; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Catholic_CofradiasDensity.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Catholic_CofradiasDensity.png")
+)
+
+
+
+# Heterogeneity: Parental Catholicism (at least one parent Catholic) --------
+
 library(dplyr)
 library(fixest)
 library(modelsummary)
 library(broom)
-library(stringr)
+library(tidyr)
+library(purrr)
 library(ggplot2)
+library(tibble)
 
-# Load data
-survey <- read_csv("survey_with_childhood_weather_harmonized.csv")
+# =========================================================
+# 1) BUILD MODEL DATA WITH PARENTAL CATHOLICISM DUMMY
+#    Definition: at least one parent is Catholic
+# =========================================================
 
-# Prepare model data (same sample restriction as your block)
-model_data <- survey %>%
+model_data_pc <- survey %>%
   filter(
     BORN_SPAIN == 1,
-    SAME_LOC_BIRTH == 1,
     !is.na(childhood_total_dry_days),
     childhood_total_dry_days != 0
   ) %>%
   mutate(
-    year = BIRTH,
-    birth_prov_cluster = interaction(BIRTH, prov_nac),
+    f_cath = as.numeric(FATHER_CATHOLIC),
+    m_cath = as.numeric(MOTHER_CATHOLIC),
     
-    # Standardize treatment
+    # At least one parent Catholic, only defined if both parental statuses observed
+    parent_cath = if_else(
+      !is.na(f_cath) & !is.na(m_cath),
+      as.integer(f_cath == 1 | m_cath == 1),
+      NA_integer_
+    ),
+    
+    year  = BIRTH,
+    birth_prov_cluster = interaction(BIRTH, prov_nac),
     childhood_total_dry_days_std =
       (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
-      sd(childhood_total_dry_days,  na.rm = TRUE),
+      sd(childhood_total_dry_days, na.rm = TRUE),
+    treat_q = ntile(childhood_total_dry_days_std, 4),
+    log_pop_birth = log(pop_birth_last_census)
+  ) %>%
+  filter(!is.na(parent_cath))
+
+# Quick checks
+model_data_pc %>%
+  count(parent_cath, treat_q, name = "n_q") %>%
+  arrange(parent_cath, treat_q) %>%
+  print()
+
+model_data_pc %>%
+  count(parent_cath, name = "n_parent_cath") %>%
+  print()
+
+# =========================================================
+# 2) QUARTILE HETEROGENEITY MODELS
+#    Baseline: Q1 among respondents with no Catholic parent
+# =========================================================
+
+# Catholic
+lpm_fe_q_controls_cat_pc <- feols(
+  CATHOLIC ~ factor(treat_q) * parent_cath +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
+    BIRTH + prov_nac,
+  data    = model_data_pc,
+  cluster = ~ prov_nac
+)
+
+# Religious practice
+lpm_fe_q_controls_rel_pc <- feols(
+  RELIGIOUS_PRACTICE ~ factor(treat_q) * parent_cath +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
+    BIRTH + prov_nac,
+  data    = model_data_pc,
+  cluster = ~ prov_nac
+)
+
+# Conservative vote
+lpm_fe_q_controls_con_pc <- feols(
+  CONSERVATIVE_VOTE ~ factor(treat_q) * parent_cath +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
+    BIRTH + prov_nac,
+  data    = model_data_pc,
+  cluster = ~ prov_nac
+)
+
+# Left-right
+lpm_fe_q_controls_lr_pc <- feols(
+  LEFT_RIGHT ~ factor(treat_q) * parent_cath +
+    FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN +
+    FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT +
+    survey_year + log_pop_birth |
+    BIRTH + prov_nac,
+  data    = model_data_pc,
+  cluster = ~ prov_nac
+)
+
+# =========================================================
+# 3) JOINT WALD TESTS: ARE QUARTILE PROFILES DIFFERENT
+#    ACROSS PARENTAL CATHOLICISM GROUPS?
+# =========================================================
+
+wald_cat_pc <- fixest::wald(
+  lpm_fe_q_controls_cat_pc,
+  keep = "factor\\(treat_q\\)[234]:parent_cath"
+)
+
+wald_rel_pc <- fixest::wald(
+  lpm_fe_q_controls_rel_pc,
+  keep = "factor\\(treat_q\\)[234]:parent_cath"
+)
+
+wald_con_pc <- fixest::wald(
+  lpm_fe_q_controls_con_pc,
+  keep = "factor\\(treat_q\\)[234]:parent_cath"
+)
+
+wald_lr_pc <- fixest::wald(
+  lpm_fe_q_controls_lr_pc,
+  keep = "factor\\(treat_q\\)[234]:parent_cath"
+)
+
+# Helper to extract p-value from printed fixest::wald output
+get_wald_p_print <- function(mod, keep_pattern) {
+  out <- capture.output(w <- fixest::wald(mod, keep = keep_pattern))
+  p_line <- grep("p-value =", out, value = TRUE)
+  as.numeric(sub(".*p-value = ([0-9.]+).*", "\\1", p_line[1]))
+}
+
+p_cat_pc <- round(get_wald_p_print(lpm_fe_q_controls_cat_pc, "factor\\(treat_q\\)[234]:parent_cath"), 3)
+p_rel_pc <- round(get_wald_p_print(lpm_fe_q_controls_rel_pc, "factor\\(treat_q\\)[234]:parent_cath"), 3)
+p_con_pc <- round(get_wald_p_print(lpm_fe_q_controls_con_pc, "factor\\(treat_q\\)[234]:parent_cath"), 3)
+p_lr_pc  <- round(get_wald_p_print(lpm_fe_q_controls_lr_pc,  "factor\\(treat_q\\)[234]:parent_cath"), 3)
+
+# Mean DV on estimation sample
+depvar_mean <- function(mod) {
+  round(mean(fitted(mod) + resid(mod), na.rm = TRUE), 2)
+}
+
+# Print Wald tests
+wald_cat_pc
+wald_rel_pc
+wald_con_pc
+wald_lr_pc
+
+# =========================================================
+# 4) TABLE
+# =========================================================
+
+modelsummary(
+  list(
+    "Catholic – Q × Parent Catholic"           = lpm_fe_q_controls_cat_pc,
+    "Religious practice – Q × Parent Catholic" = lpm_fe_q_controls_rel_pc,
+    "Conservative vote – Q × Parent Catholic"  = lpm_fe_q_controls_con_pc,
+    "Left-right – Q × Parent Catholic"         = lpm_fe_q_controls_lr_pc
+  ),
+  title = "Heterogeneity by parental Catholicism – Quartiles",
+  output = "latex",
+  stars  = c("*" = .1, "**" = .05, "***" = .01),
+  coef_omit = "^(FATHER_|MOTHER_|FEMALE)",
+  gof_omit  = "AIC|BIC|R2 Within|R2 Within Adj.",
+  add_rows = tibble::tibble(
+    term = c("Controls", "Mean dep. var.", "Wald test p-value"),
+    `Catholic – Q × Parent Catholic`           = c("Yes", depvar_mean(lpm_fe_q_controls_cat_pc), p_cat_pc),
+    `Religious practice – Q × Parent Catholic` = c("Yes", depvar_mean(lpm_fe_q_controls_rel_pc), p_rel_pc),
+    `Conservative vote – Q × Parent Catholic`  = c("Yes", depvar_mean(lpm_fe_q_controls_con_pc), p_con_pc),
+    `Left-right – Q × Parent Catholic`         = c("Yes", depvar_mean(lpm_fe_q_controls_lr_pc), p_lr_pc)
+  )
+)
+
+# =========================================================
+# 5) PLOT FUNCTION: QUARTILE ADRF, PARENTAL CATHOLICISM
+# =========================================================
+
+plot_adrf_pc_ci <- function(mod,
+                            title = "",
+                            subtitle = "",
+                            file_pdf = NULL,
+                            file_png = NULL,
+                            level = 0.95) {
+  
+  beta <- coef(mod)
+  V <- vcov(mod)
+  z <- qnorm(1 - (1 - level) / 2)
+  
+  lincomb <- function(terms, weights) {
+    ok <- terms %in% names(beta)
+    terms_ok <- terms[ok]
+    w_ok <- weights[ok]
     
-    # NEW interaction dummy
-    PARENTS_CATHOLIC = as.integer(FATHER_CATHOLIC == 1 & MOTHER_CATHOLIC == 1)
+    est <- if (length(terms_ok) == 0) 0 else sum(w_ok * beta[terms_ok])
+    
+    if (length(terms_ok) == 0) {
+      return(list(est = 0, se = NA_real_))
+    }
+    
+    Vsub <- V[terms_ok, terms_ok, drop = FALSE]
+    var <- as.numeric(t(w_ok) %*% Vsub %*% w_ok)
+    se  <- sqrt(pmax(var, 0))
+    
+    list(est = est, se = se)
+  }
+  
+  df <- expand.grid(
+    group = c("No Catholic parent", ">=1 Catholic parent"),
+    bin   = 1:4
+  ) |>
+    as_tibble() |>
+    mutate(
+      comb = pmap(list(group, bin), function(g, j) {
+        if (g == "No Catholic parent" && j == 1) {
+          return(list(terms = character(0), w = numeric(0)))
+        }
+        if (g == "No Catholic parent" && j != 1) {
+          return(list(terms = c(paste0("factor(treat_q)", j)), w = c(1)))
+        }
+        if (g == ">=1 Catholic parent" && j == 1) {
+          return(list(terms = c("parent_cath"), w = c(1)))
+        }
+        return(list(
+          terms = c("parent_cath",
+                    paste0("factor(treat_q)", j),
+                    paste0("factor(treat_q)", j, ":parent_cath")),
+          w = c(1, 1, 1)
+        ))
+      }),
+      est_se  = map(comb, ~ lincomb(.x$terms, .x$w)),
+      y       = map_dbl(est_se, "est"),
+      se      = map_dbl(est_se, "se"),
+      ci_low  = y - z * se,
+      ci_high = y + z * se
+    ) |>
+    select(group, bin, y, se, ci_low, ci_high)
+  
+  p <- ggplot(df, aes(x = bin, y = y, color = group, fill = group, group = group)) +
+    geom_hline(yintercept = 0, linetype = "dashed") +
+    geom_ribbon(
+      data = dplyr::filter(df, !is.na(ci_low), !is.na(ci_high)),
+      aes(ymin = ci_low, ymax = ci_high),
+      alpha = 0.18,
+      color = NA,
+      inherit.aes = TRUE
+    ) +
+    geom_line(linewidth = 0.7) +
+    geom_point(size = 2) +
+    scale_x_continuous(breaks = 1:4, labels = paste0("Q", 1:4)) +
+    labs(
+      title = title,
+      subtitle = subtitle,
+      x = "Treatment quartile (baseline = Q1 among respondents with no Catholic parent)",
+      y = paste0("Estimated level relative to baseline (", round(level * 100), "% CI)"),
+      color = NULL,
+      fill = NULL
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "bottom")
+  
+  print(p)
+  
+  if (!is.null(file_pdf)) {
+    ggsave(
+      filename = file_pdf,
+      plot = p,
+      device = cairo_pdf,
+      width = 8,
+      height = 5,
+      units = "in"
+    )
+  }
+  
+  if (!is.null(file_png)) {
+    ggsave(
+      filename = file_png,
+      plot = p,
+      width = 8,
+      height = 5,
+      units = "in",
+      dpi = 600,
+      bg = "white"
+    )
+  }
+  
+  invisible(p)
+}
+
+# =========================================================
+# 6) SAVE THE SAME QUARTILE HETEROGENEITY PLOTS
+# =========================================================
+
+out_dir <- "parent_catholicism_heterogeneity_quartile_plots"
+dir.create(out_dir, showWarnings = FALSE)
+
+# 1. Catholic
+p_q_catholic_pc <- plot_adrf_pc_ci(
+  mod = lpm_fe_q_controls_cat_pc,
+  title = "Catholic — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 among respondents with no Catholic parent; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Catholic_ParentCath.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Catholic_ParentCath.png")
+)
+
+# 2. Religious practice
+p_q_religious_pc <- plot_adrf_pc_ci(
+  mod = lpm_fe_q_controls_rel_pc,
+  title = "Religious practice — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 among respondents with no Catholic parent; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Religious_practice_ParentCath.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Religious_practice_ParentCath.png")
+)
+
+# 3. Conservative vote
+p_q_conservative_pc <- plot_adrf_pc_ci(
+  mod = lpm_fe_q_controls_con_pc,
+  title = "Conservative vote — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 among respondents with no Catholic parent; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Conservative_vote_ParentCath.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Conservative_vote_ParentCath.png")
+)
+
+# 4. Left-right
+p_q_leftright_pc <- plot_adrf_pc_ci(
+  mod = lpm_fe_q_controls_lr_pc,
+  title = "Left-right — Quartile heterogeneity",
+  subtitle = "Baseline: Q1 among respondents with no Catholic parent; FE: birth year + province; controls included",
+  file_pdf = file.path(out_dir, "Q_Heterogeneity_Left_right_ParentCath.pdf"),
+  file_png = file.path(out_dir, "Q_Heterogeneity_Left_right_ParentCath.png")
+)
+
+
+# MADESTAM GRAPH ----------------------------------------------------------
+
+# ---- PATH TO PLACEBO FILE (SET THIS) ----
+placebo_path <- "C:/Users/Saúl/Desktop/Semana Santa project/Grid precipitation/province_placebo_all_shifts_long_8dayblocks_option2_dropCrossYear.csv"  # <-- change
+
+stopifnot(file.exists(placebo_path))
+
+library(dplyr)
+library(readr)
+
+survey <- read_csv("survey_with_childhood_weather_harmonized.csv")
+
+# --- 0) Build a clean mapping prov_nac -> provincia_norm (unique, numeric key)
+prov_map <- prov_code_map %>%
+  dplyr::select(prov_nac, provincia_norm) %>%
+  dplyr::mutate(prov_nac = as.integer(prov_nac)) %>%
+  dplyr::distinct(prov_nac, .keep_all = TRUE)
+
+stopifnot(all(c("prov_nac","provincia_norm") %in% names(prov_map)))
+
+# --- 1) Construct model_data WITHOUT JOIN (use match)
+model_data <- survey %>%
+  mutate(
+    respondent_id   = row_number(),
+    prov_nac        = as.integer(prov_nac),
+    childhood_start = as.integer(BIRTH + 5L),
+    childhood_end   = as.integer(BIRTH + 18L),
+    provincia_norm  = prov_map$provincia_norm[ match(as.integer(prov_nac), prov_map$prov_nac) ]
+  ) %>%
+  filter(
+    BORN_SPAIN == 1,
+    !is.na(childhood_total_dry_days),
+    childhood_total_dry_days != 0,
+    !is.na(provincia_norm),
+    !is.na(childhood_start),
+    !is.na(childhood_end)
+  ) %>%
+  mutate(
+    birth_prov_cluster = interaction(BIRTH, prov_nac),
+    log_pop_birth      = log(pop_birth_last_census),
+    childhood_total_dry_days_std =
+      (childhood_total_dry_days - mean(childhood_total_dry_days, na.rm = TRUE)) /
+      sd(childhood_total_dry_days, na.rm = TRUE)
   ) %>%
   dplyr::select(
+    respondent_id, provincia_norm, childhood_start, childhood_end,
     CATHOLIC, childhood_total_dry_days, childhood_total_dry_days_std,
     survey_year, FEMALE, age, BIRTH, prov_nac,
     FATHER_BORN_SPAIN, FATHER_SCHOOL, FATHER_EDUCATION,
     FATHER_EMPLOYMENT, FATHER_EMPLOYMENT_TYPE, FATHER_CATHOLIC,
     MOTHER_BORN_SPAIN, MOTHER_SCHOOL, MOTHER_EDUCATION,
     MOTHER_EMPLOYMENT, MOTHER_CATHOLIC,
-    PARENTS_CATHOLIC,
-    birth_prov_cluster, COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE,
-    PUBLIC_SECTOR_EMP, MERITOCRACY_BELIEF, SUBJECTIVE_CLASS,
-    CONSERVATIVE_VOTE, TRUST_PEOPLE, RELIGIOUS_PRACTICE, PARTICIPATION
+    birth_prov_cluster, COUPLE_CATHOLIC, LEFT_RIGHT, INST_CONFIDENCE, PUBLIC_SECTOR_EMP,
+    MERITOCRACY_BELIEF, SUBJECTIVE_CLASS, FAR_RIGHT_VOTE, CONSERVATIVE_VOTE,
+    TRUST_PEOPLE, INCOME, EDUCATION, RELIGIOUS_PRACTICE, PARTICIPATION, SIZE_TOWN,
+    dry_days_5_9, dry_days_10_14, dry_days_15_18, PP_VOTE,
+    pop_birth_last_census, log_pop_birth
   )
 
-# Helpers (same as yours)
-safe_modelsummary <- function(mod_list, title, out_file, keep_regex) {
-  kept <- lapply(mod_list, function(m) {
-    cn <- names(coef(m))
-    if (any(stringr::str_detect(cn, keep_regex))) m else NULL
-  })
-  kept <- kept[!vapply(kept, is.null, logical(1))]
+# --- 2) Sanity checks (run once)
+stopifnot("provincia_norm" %in% names(model_data))
+table(is.na(model_data$provincia_norm))
+
+# ============================================================
+# C) MADESTAM GRAPHS (paper-style, WIDE 3-panels) + 2 FIXES
+#   - 3 sets × 3 outcomes (same outcomes as main regressions)
+#   - one dot per shift; vertical line = real estimate
+#   - DOT COLOR (both effects + p-values): "#1f77b4"
+#   - Effect = "average standardized effect" under quadratic spec:
+#       Δy = y(1SD) − y(0) = β1 + β2
+#   - FIX #1: standardization uses mean/sd from the *estimation sample*
+#            (complete cases on RHS), and is used for BOTH real + placebo
+#   - FIX #2: ONE p only (Madestam-style RI share):
+#       p_abs = share of placebo |effect| >= |real effect|
+#     (used in BOTH effects graph and p-values graph subtitles)
+#   - WIDE STYLE:
+#       title = outcome; subtitle = "p(|.|)>=..."; y-axis only on left panel
+# ============================================================
+
+library(readr)
+library(dplyr)
+library(data.table)
+library(fixest)
+library(ggplot2)
+
+DOT_COL <- "#1f77b4"
+
+# ----------------------------
+# 0) Load data + build model_data (NO join; use match)
+#    Requires: prov_code_map already created earlier
+# ----------------------------
+survey <- read_csv("survey_with_childhood_weather_harmonized.csv")
+
+prov_map <- prov_code_map %>%
+  dplyr::select(prov_nac, provincia_norm) %>%
+  dplyr::mutate(prov_nac = as.integer(prov_nac)) %>%
+  dplyr::distinct(prov_nac, .keep_all = TRUE)
+
+stopifnot(all(c("prov_nac","provincia_norm") %in% names(prov_map)))
+
+model_data <- survey %>%
+  mutate(
+    respondent_id   = row_number(),
+    prov_nac        = as.integer(prov_nac),
+    childhood_start = as.integer(BIRTH + 5L),
+    childhood_end   = as.integer(BIRTH + 18L),
+    provincia_norm  = prov_map$provincia_norm[match(as.integer(prov_nac), prov_map$prov_nac)],
+    log_pop_birth   = log(pop_birth_last_census)
+  ) %>%
+  filter(
+    BORN_SPAIN == 1,
+    !is.na(childhood_total_dry_days),
+    childhood_total_dry_days != 0,
+    !is.na(provincia_norm),
+    !is.na(childhood_start),
+    !is.na(childhood_end),
+    !is.na(log_pop_birth)
+  )
+
+stopifnot("provincia_norm" %in% names(model_data))
+print(table(is.na(model_data$provincia_norm)))
+
+# ----------------------------
+# Helpers: coef lookup + combo beta1+beta2 (delta method)
+# ----------------------------
+find_coef_name <- function(bnames, patterns){
+  for(p in patterns){
+    idx <- which(grepl(p, bnames))
+    if(length(idx) > 0) return(bnames[idx[1]])
+  }
+  NA_character_
+}
+
+combo_from_model <- function(m, lin_patterns, quad_patterns){
+  b  <- coef(m)
+  V  <- vcov(m)
+  bn <- names(b)
   
-  if (length(kept) == 0) {
-    message("No kept coefficients for: ", out_file, " (regex: ", keep_regex, ")")
-    return(invisible(NULL))
+  lin_name  <- find_coef_name(bn, lin_patterns)
+  quad_name <- find_coef_name(bn, quad_patterns)
+  
+  if (is.na(lin_name))  stop("Could not find linear term. Coef names:\n", paste(bn, collapse=", "))
+  if (is.na(quad_name)) stop("Could not find quadratic term. Coef names:\n", paste(bn, collapse=", "))
+  
+  beta_lin  <- unname(b[lin_name])
+  beta_quad <- unname(b[quad_name])
+  
+  v11 <- V[lin_name,  lin_name]
+  v22 <- V[quad_name, quad_name]
+  v12 <- V[lin_name,  quad_name]
+  
+  beta_combo <- beta_lin + beta_quad
+  se_combo   <- sqrt(as.numeric(v11 + v22 + 2*v12))
+  t_combo    <- beta_combo / se_combo
+  p_combo    <- 2 * pt(abs(t_combo), df = df.residual(m), lower.tail = FALSE)
+  
+  list(beta_combo = beta_combo, se_combo = se_combo, p_combo = p_combo)
+}
+
+# ----------------------------
+# Wide-friendly plotting style
+# ----------------------------
+madestam_theme_wide <- function(){
+  theme_minimal(base_size = 10) +
+    theme(
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(face = "bold", size = 11, margin = margin(b = 2)),
+      plot.subtitle = element_text(size = 9, margin = margin(b = 6)),
+      axis.title.x = element_text(size = 9, margin = margin(t = 6)),
+      axis.title.y = element_text(size = 9, margin = margin(r = 6)),
+      axis.text = element_text(size = 8),
+      plot.margin = margin(6, 6, 6, 6)
+    )
+}
+
+strip_y <- function(p){
+  p + theme(
+    axis.title.y = element_blank(),
+    axis.text.y  = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+}
+
+# ============================================================
+# C1) EFFECTS GRAPH: ranked placebo effects, subtitle has ONE p
+#     p_abs = share of placebo |effect| >= |real|
+# ============================================================
+run_madestam_rankplot_combo <- function(
+    outcome_var,
+    model_data,
+    placebo_path,
+    normalize_name,
+    name_map,
+    raw_expo_var = "childhood_total_dry_days",
+    fe_birth = "BIRTH",
+    fe_prov  = "prov_nac",
+    cluster_var = "prov_nac"
+){
+  
+  req <- c(
+    "respondent_id","provincia_norm","childhood_start","childhood_end",
+    outcome_var, raw_expo_var,
+    "BIRTH","prov_nac","survey_year",
+    "FEMALE","FATHER_BORN_SPAIN","MOTHER_BORN_SPAIN",
+    "FATHER_EMPLOYMENT","MOTHER_EMPLOYMENT","log_pop_birth"
+  )
+  miss <- setdiff(req, names(model_data))
+  if(length(miss) > 0) stop("model_data missing: ", paste(miss, collapse=", "))
+  
+  md <- as.data.table(copy(model_data))
+  cluster_fml <- as.formula(paste0("~", cluster_var))
+  
+  # exact estimation sample (complete cases on RHS)
+  base_dt <- md[complete.cases(md[, ..req]), ..req]
+  setkey(base_dt, respondent_id)
+  
+  # FIX #1: mean/sd on estimation sample
+  real_raw_mean <- mean(base_dt[[raw_expo_var]], na.rm = TRUE)
+  real_raw_sd   <- sd(base_dt[[raw_expo_var]], na.rm = TRUE)
+  stopifnot(is.finite(real_raw_sd) && real_raw_sd > 0)
+  
+  # --- Load placebo from file (your CSV/Excel-exported-to-CSV) ---
+  placebo_raw <- read_csv(placebo_path, locale = locale(encoding="UTF-8"), show_col_types = FALSE)
+  stopifnot(all(c("provincia","year","placebo_dry_days_10","shift_days") %in% names(placebo_raw)))
+  placebo_dt <- as.data.table(placebo_raw)
+  
+  placebo_dt[, key := normalize_name(provincia)]
+  placebo_dt <- merge(placebo_dt, as.data.table(name_map), by="key", all.x=TRUE)
+  placebo_dt[, provincia_official := fifelse(is.na(ine_name), provincia, ine_name)]
+  placebo_dt[, provincia_norm := normalize_name(provincia_official)]
+  placebo_dt[, year := as.integer(year)]
+  placebo_dt[, shift_days := as.integer(shift_days)]
+  placebo_dt[, placebo_dry_days_10 := as.numeric(placebo_dry_days_10)]
+  
+  placebo_yearly <- placebo_dt[
+    , .(placebo_year_total = sum(placebo_dry_days_10, na.rm=TRUE)),
+    by = .(provincia_norm, year, shift_days)
+  ]
+  setkey(placebo_yearly, provincia_norm, year)
+  shift_values <- sort(unique(placebo_yearly$shift_days))
+  
+  # --- Madestam assignment: childhood panel then sum by shift ---
+  child_panel <- base_dt[
+    , .(year = seq.int(childhood_start, childhood_end)),
+    by = .(respondent_id, provincia_norm)
+  ]
+  setkey(child_panel, provincia_norm, year)
+  
+  tmp <- placebo_yearly[
+    child_panel,
+    on = .(provincia_norm, year),
+    allow.cartesian = TRUE,
+    nomatch = 0L
+  ]
+  
+  expo_dt <- tmp[
+    , .(placebo_childhood_total = sum(placebo_year_total, na.rm=TRUE)),
+    by = .(respondent_id, shift_days)
+  ]
+  
+  full_grid <- CJ(respondent_id = unique(base_dt$respondent_id),
+                  shift_days    = shift_values,
+                  unique = TRUE)
+  
+  reg_dt <- merge(full_grid, expo_dt, by=c("respondent_id","shift_days"), all.x=TRUE)
+  reg_dt[is.na(placebo_childhood_total), placebo_childhood_total := 0]
+  reg_dt <- merge(reg_dt, base_dt, by="respondent_id", all.x=TRUE)
+  
+  # FIX #1 continued: local std treatment for REAL regression
+  reg_dt[, treat_std_local := (get(raw_expo_var) - real_raw_mean) / real_raw_sd]
+  
+  # --- Real regression (controls + quadratic) ---
+  real_slice <- reg_dt[shift_days == shift_values[1]]
+  
+  fml_real <- as.formula(paste0(
+    outcome_var, " ~ treat_std_local + I(treat_std_local^2) + ",
+    "FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + ",
+    "FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | ",
+    fe_birth, " + ", fe_prov
+  ))
+  
+  real_m <- feols(fml_real, data = real_slice, cluster = cluster_fml)
+  
+  real_combo <- combo_from_model(
+    real_m,
+    lin_patterns  = c("^treat_std_local$"),
+    quad_patterns = c("^I\\(treat_std_local\\^2\\)$", "^I\\(treat_std_local\\^2\\)", "treat_std_local\\^2")
+  )
+  
+  # --- Placebo regressions per shift ---
+  fml_pl <- as.formula(paste0(
+    outcome_var, " ~ placebo_std + I(placebo_std^2) + ",
+    "FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + ",
+    "FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | ",
+    fe_birth, " + ", fe_prov
+  ))
+  
+  estimate_shift <- function(s){
+    df_s <- reg_dt[shift_days == s]
+    df_s[, placebo_std := (placebo_childhood_total - real_raw_mean) / real_raw_sd]
+    
+    m <- feols(fml_pl, data = df_s, cluster = cluster_fml)
+    
+    cmb <- combo_from_model(
+      m,
+      lin_patterns  = c("^placebo_std$"),
+      quad_patterns = c("^I\\(placebo_std\\^2\\)$", "^I\\(placebo_std\\^2\\)", "placebo_std\\^2")
+    )
+    
+    data.table(shift_days = s, beta_combo = cmb$beta_combo, p_combo = cmb$p_combo, n = nobs(m))
   }
   
-  modelsummary(
-    kept,
-    title = title,
-    output = out_file,
-    stars = c("*" = .1, "**" = .05, "***" = .01),
-    coef_keep = keep_regex,
-    gof_omit  = "AIC|BIC|RMSE|R2|Within|Pseudo|Std.Errors"
+  placebo_res <- rbindlist(lapply(shift_values, estimate_shift), fill=TRUE)
+  
+  # FIX #2 (requested): ONE p only = absolute tail share
+  p_abs <- mean(abs(placebo_res$beta_combo) >= abs(real_combo$beta_combo), na.rm = TRUE)
+  
+  # ranked effect plot
+  rank_df <- placebo_res[!is.na(beta_combo)][order(beta_combo)]
+  rank_df[, rank := seq_len(.N)]
+  
+  p_rank <- ggplot(rank_df, aes(x = beta_combo, y = rank)) +
+    geom_point(size = 1.35, alpha = 0.85, color = DOT_COL) +
+    geom_vline(xintercept = real_combo$beta_combo, linewidth = 1.05) +
+    labs(
+      title = outcome_var,
+      subtitle = sprintf("share placebo effects greater or equal than real: %.3f", p_abs),
+      x = "Average standardized effect (β1 + β2)",
+      y = "Placebo rank"
+    ) +
+    madestam_theme_wide()
+  
+  list(
+    placebo_res = placebo_res,
+    real_model  = real_m,
+    real_combo  = real_combo,
+    p_abs       = p_abs,
+    plot_rank   = p_rank
   )
 }
 
-plot_terms <- function(mod, keep_regex, title, subtitle, file) {
+# ============================================================
+# C2) P-VALUES GRAPH: ranked placebo p-values, subtitle has ONE p
+#     p_abs (same definition as above, but computed on EFFECTS),
+#     shown again for comparability across both graph types.
+# ============================================================
+run_madestam_rankplot_pvals <- function(
+    outcome_var,
+    model_data,
+    placebo_path,
+    normalize_name,
+    name_map,
+    raw_expo_var = "childhood_total_dry_days",
+    fe_birth = "BIRTH",
+    fe_prov  = "prov_nac",
+    cluster_var = "prov_nac"
+){
   
-  td <- broom::tidy(mod, conf.int = TRUE) %>%
-    filter(str_detect(term, keep_regex))
-  
-  if (nrow(td) == 0) return(invisible(NULL))
-  
-  td <- td %>%
-    mutate(term = str_replace_all(term, "factor\\(treat_q\\)", "Q")) %>%
-    mutate(term = str_replace_all(term, "factor\\(treat_t\\)", "T")) %>%
-    mutate(term = str_replace_all(term, ":PARENTS_CATHOLIC", " × ParentsCatholic")) %>%
-    mutate(term = str_replace_all(term, "I\\(treat_std\\^2\\)", "treat_std^2"))
-  
-  p <- ggplot(td, aes(x = term, y = estimate)) +
-    geom_hline(yintercept = 0, linetype = 2) +
-    geom_point(size = 2.2) +
-    geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
-    coord_flip() +
-    labs(title = title, subtitle = subtitle, x = NULL, y = "Coefficient") +
-    theme_minimal(base_size = 13)
-  
-  ggsave(file, p, width = 8.5, height = 5.2, dpi = 300)
-  p
-}
-
-# Output folders
-dir.create("flex_parents_outputs", showWarnings = FALSE)
-dir.create("flex_parents_outputs/plots", showWarnings = FALSE)
-dir.create("flex_parents_outputs/tables", showWarnings = FALSE)
-
-# Map treatment bins
-model_data <- model_data %>%
-  mutate(
-    treat_std = childhood_total_dry_days_std,
-    treat_q   = ntile(treat_std + rnorm(n(), 0, 1e-8), 4),
-    treat_t   = ntile(treat_std + rnorm(n(), 0, 1e-8), 3)
+  req <- c(
+    "respondent_id","provincia_norm","childhood_start","childhood_end",
+    outcome_var, raw_expo_var,
+    "BIRTH","prov_nac","survey_year",
+    "FEMALE","FATHER_BORN_SPAIN","MOTHER_BORN_SPAIN",
+    "FATHER_EMPLOYMENT","MOTHER_EMPLOYMENT","log_pop_birth"
   )
-
-# Outcomes (NO FAR_RIGHT_VOTE)
-outcomes_relig <- c("CATHOLIC", "RELIGIOUS_PRACTICE", "COUPLE_CATHOLIC")
-outcomes_pol   <- c("PARTICIPATION", "CONSERVATIVE_VOTE", "LEFT_RIGHT")
-all_outcomes   <- c(outcomes_relig, outcomes_pol)
-
-# Controls (keep your baseline controls; DO NOT include FATHER_CATHOLIC/MOTHER_CATHOLIC since we interact them)
-controls <- c("FEMALE", "FATHER_BORN_SPAIN", "MOTHER_BORN_SPAIN",
-              "FATHER_EMPLOYMENT", "MOTHER_EMPLOYMENT", "survey_year")
-
-
-# A) Continuous flexible model with PARENTS_CATHOLIC interaction
-#     (treat + treat^2) × PARENTS_CATHOLIC
-
-run_cont_models_par <- function(y, with_controls = TRUE) {
+  miss <- setdiff(req, names(model_data))
+  if(length(miss) > 0) stop("model_data missing: ", paste(miss, collapse=", "))
   
-  rhs_main <- if (with_controls) paste(controls, collapse = " + ") else "survey_year"
+  md <- as.data.table(copy(model_data))
+  cluster_fml <- as.formula(paste0("~", cluster_var))
   
-  f <- as.formula(paste0(
-    y, " ~ treat_std + I(treat_std^2) + PARENTS_CATHOLIC + ",
-    "treat_std:PARENTS_CATHOLIC + I(treat_std^2):PARENTS_CATHOLIC + ",
-    rhs_main,
-    " | BIRTH + prov_nac"
+  # exact estimation sample (complete cases on RHS)
+  base_dt <- md[complete.cases(md[, ..req]), ..req]
+  setkey(base_dt, respondent_id)
+  
+  # FIX #1: mean/sd on estimation sample
+  real_raw_mean <- mean(base_dt[[raw_expo_var]], na.rm = TRUE)
+  real_raw_sd   <- sd(base_dt[[raw_expo_var]], na.rm = TRUE)
+  stopifnot(is.finite(real_raw_sd) && real_raw_sd > 0)
+  
+  # --- Load placebo ---
+  placebo_raw <- read_csv(placebo_path, locale = locale(encoding="UTF-8"), show_col_types = FALSE)
+  stopifnot(all(c("provincia","year","placebo_dry_days_10","shift_days") %in% names(placebo_raw)))
+  placebo_dt <- as.data.table(placebo_raw)
+  
+  placebo_dt[, key := normalize_name(provincia)]
+  placebo_dt <- merge(placebo_dt, as.data.table(name_map), by="key", all.x=TRUE)
+  placebo_dt[, provincia_official := fifelse(is.na(ine_name), provincia, ine_name)]
+  placebo_dt[, provincia_norm := normalize_name(provincia_official)]
+  placebo_dt[, year := as.integer(year)]
+  placebo_dt[, shift_days := as.integer(shift_days)]
+  placebo_dt[, placebo_dry_days_10 := as.numeric(placebo_dry_days_10)]
+  
+  placebo_yearly <- placebo_dt[
+    , .(placebo_year_total = sum(placebo_dry_days_10, na.rm=TRUE)),
+    by = .(provincia_norm, year, shift_days)
+  ]
+  setkey(placebo_yearly, provincia_norm, year)
+  shift_values <- sort(unique(placebo_yearly$shift_days))
+  
+  # --- Madestam assignment ---
+  child_panel <- base_dt[
+    , .(year = seq.int(childhood_start, childhood_end)),
+    by = .(respondent_id, provincia_norm)
+  ]
+  setkey(child_panel, provincia_norm, year)
+  
+  tmp <- placebo_yearly[
+    child_panel,
+    on = .(provincia_norm, year),
+    allow.cartesian = TRUE,
+    nomatch = 0L
+  ]
+  
+  expo_dt <- tmp[
+    , .(placebo_childhood_total = sum(placebo_year_total, na.rm=TRUE)),
+    by = .(respondent_id, shift_days)
+  ]
+  
+  full_grid <- CJ(respondent_id = unique(base_dt$respondent_id),
+                  shift_days    = shift_values,
+                  unique = TRUE)
+  
+  reg_dt <- merge(full_grid, expo_dt, by=c("respondent_id","shift_days"), all.x=TRUE)
+  reg_dt[is.na(placebo_childhood_total), placebo_childhood_total := 0]
+  reg_dt <- merge(reg_dt, base_dt, by="respondent_id", all.x=TRUE)
+  
+  # local standardized treatment for REAL regression
+  reg_dt[, treat_std_local := (get(raw_expo_var) - real_raw_mean) / real_raw_sd]
+  
+  # --- Real regression ---
+  real_slice <- reg_dt[shift_days == shift_values[1]]
+  
+  fml_real <- as.formula(paste0(
+    outcome_var, " ~ treat_std_local + I(treat_std_local^2) + ",
+    "FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + ",
+    "FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | ",
+    fe_birth, " + ", fe_prov
   ))
   
-  feols(f, data = model_data, cluster = ~prov_nac)
-}
-
-cont_nc <- lapply(all_outcomes, run_cont_models_par, with_controls = FALSE)
-names(cont_nc) <- all_outcomes
-
-cont_c <- lapply(all_outcomes, run_cont_models_par, with_controls = TRUE)
-names(cont_c) <- all_outcomes
-
-safe_modelsummary(
-  cont_nc,
-  "Flexible (treat + treat^2) × ParentsCatholic — NO controls (FE: birth + province)",
-  "flex_parents_outputs/tables/cont_nocontrols.tex",
-  keep_regex = "treat_std|I\\(treat_std\\^2\\)|PARENTS_CATHOLIC|:PARENTS_CATHOLIC"
-)
-
-safe_modelsummary(
-  cont_c,
-  "Flexible (treat + treat^2) × ParentsCatholic — WITH controls (FE: birth + province)",
-  "flex_parents_outputs/tables/cont_controls.tex",
-  keep_regex = "treat_std|I\\(treat_std\\^2\\)|PARENTS_CATHOLIC|:PARENTS_CATHOLIC"
-)
-
-for (y in all_outcomes) {
-  plot_terms(
-    cont_c[[y]],
-    keep_regex = "treat_std|I\\(treat_std\\^2\\)|treat_std:PARENTS_CATHOLIC|I\\(treat_std\\^2\\):PARENTS_CATHOLIC",
-    title = paste0(y, " — Flexible interaction (ParentsCatholic, controls)"),
-    subtitle = "Shows treat, treat^2, and interactions with ParentsCatholic",
-    file = file.path("flex_parents_outputs/plots", paste0("cont_controls_", y, ".png"))
+  real_m <- feols(fml_real, data = real_slice, cluster = cluster_fml)
+  
+  real_combo <- combo_from_model(
+    real_m,
+    lin_patterns  = c("^treat_std_local$"),
+    quad_patterns = c("^I\\(treat_std_local\\^2\\)$", "^I\\(treat_std_local\\^2\\)", "treat_std_local\\^2")
   )
-}
-
-
-# B) Quartile ADRF × PARENTS_CATHOLIC
-
-run_q_models_par <- function(y, with_controls = TRUE) {
-  rhs <- if (with_controls) paste(controls, collapse = " + ") else "survey_year"
-  f <- as.formula(paste0(
-    y, " ~ factor(treat_q) * PARENTS_CATHOLIC + ", rhs, " | BIRTH + prov_nac"
+  real_p <- real_combo$p_combo
+  
+  # --- Placebo regressions per shift ---
+  fml_pl <- as.formula(paste0(
+    outcome_var, " ~ placebo_std + I(placebo_std^2) + ",
+    "FEMALE + FATHER_BORN_SPAIN + MOTHER_BORN_SPAIN + ",
+    "FATHER_EMPLOYMENT + MOTHER_EMPLOYMENT + survey_year + log_pop_birth | ",
+    fe_birth, " + ", fe_prov
   ))
-  feols(f, data = model_data, cluster = ~prov_nac)
-}
-
-q_nc <- lapply(all_outcomes, run_q_models_par, with_controls = FALSE)
-names(q_nc) <- all_outcomes
-
-q_c <- lapply(all_outcomes, run_q_models_par, with_controls = TRUE)
-names(q_c) <- all_outcomes
-
-safe_modelsummary(
-  q_nc,
-  "Quartile ADRF × ParentsCatholic — NO controls (baseline: Q1 & ParentsCatholic=0)",
-  "flex_parents_outputs/tables/quartiles_nocontrols.tex",
-  keep_regex = "^factor\\(treat_q\\)|:PARENTS_CATHOLIC|^PARENTS_CATHOLIC$"
-)
-
-safe_modelsummary(
-  q_c,
-  "Quartile ADRF × ParentsCatholic — WITH controls (baseline: Q1 & ParentsCatholic=0)",
-  "flex_parents_outputs/tables/quartiles_controls.tex",
-  keep_regex = "^factor\\(treat_q\\)|:PARENTS_CATHOLIC|^PARENTS_CATHOLIC$"
-)
-
-for (y in all_outcomes) {
-  plot_terms(
-    q_c[[y]],
-    keep_regex = "^factor\\(treat_q\\)|:PARENTS_CATHOLIC",
-    title = paste0(y, " — Quartile ADRF × ParentsCatholic (controls)"),
-    subtitle = "Bin effects and bin×ParentsCatholic interaction terms",
-    file = file.path("flex_parents_outputs/plots", paste0("quartiles_controls_", y, ".png"))
+  
+  estimate_shift <- function(s){
+    df_s <- reg_dt[shift_days == s]
+    df_s[, placebo_std := (placebo_childhood_total - real_raw_mean) / real_raw_sd]
+    
+    m <- feols(fml_pl, data = df_s, cluster = cluster_fml)
+    
+    cmb <- combo_from_model(
+      m,
+      lin_patterns  = c("^placebo_std$"),
+      quad_patterns = c("^I\\(placebo_std\\^2\\)$", "^I\\(placebo_std\\^2\\)", "placebo_std\\^2")
+    )
+    
+    data.table(shift_days = s, beta_combo = cmb$beta_combo, p_combo = cmb$p_combo, n = nobs(m))
+  }
+  
+  placebo_res <- rbindlist(lapply(shift_values, estimate_shift), fill=TRUE)
+  
+  # ONE p (same as effects): absolute tail share on |effect|
+  p_abs <- mean(abs(placebo_res$beta_combo) >= abs(real_combo$beta_combo), na.rm = TRUE)
+  
+  # ranked p-value plot
+  rank_df <- placebo_res[!is.na(p_combo)][order(p_combo)]
+  rank_df[, rank := seq_len(.N)]
+  
+  p_rank_p <- ggplot(rank_df, aes(x = p_combo, y = rank)) +
+    geom_point(size = 1.35, alpha = 0.85, color = DOT_COL) +
+    geom_vline(xintercept = real_p, linewidth = 1.05) +
+    labs(
+      title = outcome_var,
+      subtitle = sprintf("share placebo p-values greater or equal than real: %.3f", p_abs),
+      x = "p-value for combo effect (β1 + β2)",
+      y = "Placebo rank"
+    ) +
+    madestam_theme_wide()
+  
+  list(
+    placebo_res = placebo_res,
+    real_model  = real_m,
+    real_p      = real_p,
+    p_abs       = p_abs,
+    plot_pvals  = p_rank_p
   )
 }
 
-# C) Tertile ADRF × PARENTS_CATHOLIC
+# ============================================================
+# Build 3 sets × 3 outcomes (same as your main regressions)
+# ============================================================
+set1 <- c("CATHOLIC", "RELIGIOUS_PRACTICE", "COUPLE_CATHOLIC")
+set2 <- c("PARTICIPATION", "CONSERVATIVE_VOTE", "LEFT_RIGHT")
+set3 <- c("EDUCATION", "INCOME", "TRUST_PEOPLE")
 
-run_t_models_par <- function(y, with_controls = TRUE) {
-  rhs <- if (with_controls) paste(controls, collapse = " + ") else "survey_year"
-  f <- as.formula(paste0(
-    y, " ~ factor(treat_t) * PARENTS_CATHOLIC + ", rhs, " | BIRTH + prov_nac"
-  ))
-  feols(f, data = model_data, cluster = ~prov_nac)
+run_set_effects <- function(outcomes){
+  lapply(outcomes, function(y){
+    run_madestam_rankplot_combo(
+      outcome_var    = y,
+      model_data     = model_data,
+      placebo_path   = placebo_path,
+      normalize_name = normalize_name,
+      name_map       = name_map
+    )
+  })
 }
 
-t_nc <- lapply(all_outcomes, run_t_models_par, with_controls = FALSE)
-names(t_nc) <- all_outcomes
+run_set_pvals <- function(outcomes){
+  lapply(outcomes, function(y){
+    run_madestam_rankplot_pvals(
+      outcome_var    = y,
+      model_data     = model_data,
+      placebo_path   = placebo_path,
+      normalize_name = normalize_name,
+      name_map       = name_map
+    )
+  })
+}
 
-t_c <- lapply(all_outcomes, run_t_models_par, with_controls = TRUE)
-names(t_c) <- all_outcomes
+# --- run
+out_set1  <- run_set_effects(set1)
+out_set2  <- run_set_effects(set2)
+out_set3  <- run_set_effects(set3)
 
-safe_modelsummary(
-  t_nc,
-  "Tertile ADRF × ParentsCatholic — NO controls (baseline: T1 & ParentsCatholic=0)",
-  "flex_parents_outputs/tables/tertiles_nocontrols.tex",
-  keep_regex = "^factor\\(treat_t\\)|:PARENTS_CATHOLIC|^PARENTS_CATHOLIC$"
-)
+outp_set1 <- run_set_pvals(set1)
+outp_set2 <- run_set_pvals(set2)
+outp_set3 <- run_set_pvals(set3)
 
-safe_modelsummary(
-  t_c,
-  "Tertile ADRF × ParentsCatholic — WITH controls (baseline: T1 & ParentsCatholic=0)",
-  "flex_parents_outputs/tables/tertiles_controls.tex",
-  keep_regex = "^factor\\(treat_t\\)|:PARENTS_CATHOLIC|^PARENTS_CATHOLIC$"
-)
+# ============================================================
+# Save individual PNGs (optional)
+# ============================================================
+save_one <- function(out_list, names_vec, prefix, which_plot = c("plot_rank","plot_pvals")){
+  which_plot <- match.arg(which_plot)
+  for(i in seq_along(out_list)){
+    ggsave(
+      filename = paste0(prefix, "_", names_vec[i], ".png"),
+      plot = out_list[[i]][[which_plot]],
+      width = 7.2, height = 4.2, dpi = 300
+    )
+  }
+}
 
-for (y in all_outcomes) {
-  plot_terms(
-    t_c[[y]],
-    keep_regex = "^factor\\(treat_t\\)|:PARENTS_CATHOLIC",
-    title = paste0(y, " — Tertile ADRF × ParentsCatholic (controls)"),
-    subtitle = "Bin effects and bin×ParentsCatholic interaction terms",
-    file = file.path("flex_parents_outputs/plots", paste0("tertiles_controls_", y, ".png"))
-  )
+save_one(out_set1,  set1, "madestam_effects_set1", "plot_rank")
+save_one(out_set2,  set2, "madestam_effects_set2", "plot_rank")
+save_one(out_set3,  set3, "madestam_effects_set3", "plot_rank")
+
+save_one(outp_set1, set1, "madestam_pvals_set1",   "plot_pvals")
+save_one(outp_set2, set2, "madestam_pvals_set2",   "plot_pvals")
+save_one(outp_set3, set3, "madestam_pvals_set3",   "plot_pvals")
+
+# ============================================================
+# Combine into 3-panel figures (HORIZONTAL: 1 row × 3 columns)
+#   - keep y-axis only in left panel
+# ============================================================
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  
+  # ---- effects rows
+  fig_set1 <- out_set1[[1]]$plot_rank + strip_y(out_set1[[2]]$plot_rank) + strip_y(out_set1[[3]]$plot_rank) +
+    plot_layout(ncol = 3)
+  fig_set2 <- out_set2[[1]]$plot_rank + strip_y(out_set2[[2]]$plot_rank) + strip_y(out_set2[[3]]$plot_rank) +
+    plot_layout(ncol = 3)
+  fig_set3 <- out_set3[[1]]$plot_rank + strip_y(out_set3[[2]]$plot_rank) + strip_y(out_set3[[3]]$plot_rank) +
+    plot_layout(ncol = 3)
+  
+  ggsave("madestam_3panel_effects_set1.png", fig_set1, width = 12.8, height = 4.2, dpi = 300)
+  ggsave("madestam_3panel_effects_set2.png", fig_set2, width = 12.8, height = 4.2, dpi = 300)
+  ggsave("madestam_3panel_effects_set3.png", fig_set3, width = 12.8, height = 4.2, dpi = 300)
+  
+  # ---- p-values rows
+  figp_set1 <- outp_set1[[1]]$plot_pvals + strip_y(outp_set1[[2]]$plot_pvals) + strip_y(outp_set1[[3]]$plot_pvals) +
+    plot_layout(ncol = 3)
+  figp_set2 <- outp_set2[[1]]$plot_pvals + strip_y(outp_set2[[2]]$plot_pvals) + strip_y(outp_set2[[3]]$plot_pvals) +
+    plot_layout(ncol = 3)
+  figp_set3 <- outp_set3[[1]]$plot_pvals + strip_y(outp_set3[[2]]$plot_pvals) + strip_y(outp_set3[[3]]$plot_pvals) +
+    plot_layout(ncol = 3)
+  
+  ggsave("madestam_3panel_pvals_set1.png", figp_set1, width = 12.8, height = 4.2, dpi = 300)
+  ggsave("madestam_3panel_pvals_set2.png", figp_set2, width = 12.8, height = 4.2, dpi = 300)
+  ggsave("madestam_3panel_pvals_set3.png", figp_set3, width = 12.8, height = 4.2, dpi = 300)
+  
+} else if (requireNamespace("gridExtra", quietly = TRUE)) {
+  library(gridExtra)
+  
+  # effects
+  fig_set1 <- gridExtra::grid.arrange(out_set1[[1]]$plot_rank,
+                                      strip_y(out_set1[[2]]$plot_rank),
+                                      strip_y(out_set1[[3]]$plot_rank),
+                                      ncol = 3)
+  fig_set2 <- gridExtra::grid.arrange(out_set2[[1]]$plot_rank,
+                                      strip_y(out_set2[[2]]$plot_rank),
+                                      strip_y(out_set2[[3]]$plot_rank),
+                                      ncol = 3)
+  fig_set3 <- gridExtra::grid.arrange(out_set3[[1]]$plot_rank,
+                                      strip_y(out_set3[[2]]$plot_rank),
+                                      strip_y(out_set3[[3]]$plot_rank),
+                                      ncol = 3)
+  
+  png("madestam_3panel_effects_set1.png", width = 12.8, height = 4.2, units = "in", res = 300)
+  grid::grid.draw(fig_set1); dev.off()
+  
+  png("madestam_3panel_effects_set2.png", width = 12.8, height = 4.2, units = "in", res = 300)
+  grid::grid.draw(fig_set2); dev.off()
+  
+  png("madestam_3panel_effects_set3.png", width = 12.8, height = 4.2, units = "in", res = 300)
+  grid::grid.draw(fig_set3); dev.off()
+  
+  # p-values
+  figp_set1 <- gridExtra::grid.arrange(outp_set1[[1]]$plot_pvals,
+                                       strip_y(outp_set1[[2]]$plot_pvals),
+                                       strip_y(outp_set1[[3]]$plot_pvals),
+                                       ncol = 3)
+  figp_set2 <- gridExtra::grid.arrange(outp_set2[[1]]$plot_pvals,
+                                       strip_y(outp_set2[[2]]$plot_pvals),
+                                       strip_y(outp_set2[[3]]$plot_pvals),
+                                       ncol = 3)
+  figp_set3 <- gridExtra::grid.arrange(outp_set3[[1]]$plot_pvals,
+                                       strip_y(outp_set3[[2]]$plot_pvals),
+                                       strip_y(outp_set3[[3]]$plot_pvals),
+                                       ncol = 3)
+  
+  png("madestam_3panel_pvals_set1.png", width = 12.8, height = 4.2, units = "in", res = 300)
+  grid::grid.draw(figp_set1); dev.off()
+  
+  png("madestam_3panel_pvals_set2.png", width = 12.8, height = 4.2, units = "in", res = 300)
+  grid::grid.draw(figp_set2); dev.off()
+  
+  png("madestam_3panel_pvals_set3.png", width = 12.8, height = 4.2, units = "in", res = 300)
+  grid::grid.draw(figp_set3); dev.off()
+  
+} else {
+  message("Install either 'patchwork' (recommended) or 'gridExtra' to create 3-panel figures.")
 }
